@@ -52,7 +52,7 @@
                                             {"mlt.fl" "text,title"
                                              "mlt.boost" "true"
                                              "mlt.interestingTerms" "details"
-                                             "fl" "id,title,score,popularity,last_modified,author,push,dislike,arrow,subject"
+                                             "fl" "id,title,score,popularity,last_modified,author,push,dislike,arrow,subject,length"
                                              "fq" ["last_modified:[NOW/DAY-60DAYS TO NOW/DAY+1DAY]"
                                                    (format "popularity:[%s TO *]" popularity)]
 
@@ -109,6 +109,17 @@
 (defn best-match-weight [{:keys [n-pop n-score n-recent]}]
   (+ (* n-pop 2) (* n-score 5) (* n-recent 10))
   )
+
+(defn excellent-article? [{:keys [push dislike length title]}]
+  (and (> (or push 0) 100)
+       (> (/ (or push 0) (+ (or push 0) (or dislike 0))) 0.8)
+       (> (or length 0) 300)
+       (not (re-matches #"^(Fw:)?\s*\[?新聞\]?.*" (or title "")))
+       (not (re-matches #"^(Fw:)?\s*\[?問卦\]?.*" (or title "")))
+       )
+  )
+
+
 (defn search-handler [req]
   (with-channel req channel
                 (let [start-time (System/nanoTime)
@@ -139,8 +150,17 @@
                                                                     (filter (fn [{:keys [title]}]
                                                                               (and (not= title "") (not (re-matches #"^Re:.*" title))) )
                                                                             matches))))
-                                response (-> {:articles (reverse (sort-by :last_modified (take 10 matches)))}
+                                excellent-articles (take 3 (reverse (sort-by :last_modified (filter excellent-article? matches))))
+                                excellent-article-ids (into #{} (map :id excellent-articles))
+                                response (-> {:articles
+                                              (->> matches
+                                                   (filter #(not (contains? excellent-article-ids (:id %))))
+                                                   (take 10)
+                                                   (sort-by :last_modified)
+                                                   (reverse))
+                                              }
                                              (assoc :best-match best-match)
+                                             (assoc :excellent-articles excellent-articles)
                                              )
 
                                 ]

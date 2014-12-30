@@ -276,7 +276,7 @@
                           :arrow arrow
                           :length length
                           :board board
-                          :isReply (true? (re-matches #"^Re.*" (or title "")))
+                          :isReply (not (nil? (re-matches #"^Re.*" (or title ""))))
                           :last_modified (c/to-string time)}
                          (catch Exception e (warn e p)
                                             (throw e))))
