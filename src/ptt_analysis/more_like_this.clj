@@ -1,91 +1,57 @@
-(ns ptt-analysis.yahoo
+(ns ptt-analysis.more-like-this
   (:import (org.joda.time DateTimeZone DateTime)
            (com.luhuiguo.chinese ChineseUtils))
-  (:require [org.httpkit.client :as http]
-            [clojure.core.async :refer [chan <! go put! <!! >!]]
-            [net.cgrand.enlive-html :as html]
-            [clj-time.core :as t]
-            [clj-time.format :as f]
-            [taoensso.timbre :as timbre
-             :refer (log info warn error trace)]
-            [cheshire.core :as json]
-            [taoensso.timbre.profiling :as profiling
-             :refer (pspy pspy* profile defnp p p*)]
-            [clj-time.coerce :as c]
-            [monger.core :as mg]
-            [monger.collection :as mc]
-            [compojure.handler :as handler]
-            [compojure.route :as route]
-            [ring.middleware.cors :refer [wrap-cors]]
-            [org.httpkit.client :as http])
-  (:use [compojure.route :only [files not-found]]
-        [compojure.handler :only [site]] ; form, query params decode; cookie; session, etc
-        [compojure.core :only [defroutes GET POST DELETE ANY context]]
-        org.httpkit.server)
-  (:use [ring.middleware.params         :only [wrap-params]]
-        [ring.middleware.json :only [wrap-json-response]]
-        [ptt-analysis.async]
-        )
-  )
-(defonce server (atom nil))
-
-(defn async-get [& args]
-  (let [ch (chan 1)]
-    (apply http/get (concat  args [#(if (or (:error %) (= (:status %) 503))
-                                     (put! ch (Exception. (str "Query " args "Error:" %)))
-                                     (put! ch (:body %)))]))
-    ch
-    )
-  )
-(defn async-post[& args]
-  (let [ch (chan 1)]
-    (apply http/post (concat  args [#(if (or (:error %) (= (:status %) 503))
-                                     (put! ch (Exception. (str "Query " args "Error:" %)))
-                                     (put! ch (:body %)))]))
-    ch
-    )
+  (:require
+    [clj-time.core :as t]
+    [taoensso.timbre :as timbre
+     :refer (log info warn error trace)]
+    [cheshire.core :as json]
+    [taoensso.timbre.profiling :as profiling
+     :refer (pspy pspy* profile defnp p p*)]
+    [clj-time.coerce :as c]
+    [clojure.core.async :refer [chan <! go put! <!! >!]])
+  (:use org.httpkit.server
+        ptt-analysis.async)
   )
 
 (defn get-more-like-this [news popularity]
   (go-try (let [body (<? (async-post  "http://localhost:8983/solr/mlt"
-                                  {:query-params
-                                            {"mlt.fl" "text,title"
-                                             "mlt.boost" "true"
-                                             "mlt.interestingTerms" "details"
-                                             "fl" "id,title,score,popularity,last_modified,author,push,dislike,arrow,subject,length"
-                                             "fq" ["last_modified:[NOW/DAY-60DAYS TO NOW/DAY+1DAY]"
-                                                   (format "popularity:[%s TO *]" popularity)]
+                                      {:query-params
+                                                {"mlt.fl" "text,title"
+                                                 "mlt.boost" "true"
+                                                 "mlt.interestingTerms" "details"
+                                                 "fl" "id,title,score,popularity,last_modified,author,push,dislike,arrow,subject,length"
+                                                 "fq" ["last_modified:[NOW/DAY-60DAYS TO NOW/DAY+1DAY]"
+                                                       (format "popularity:[%s TO *]" popularity)]
 
-                                             "rows" "100"
-                                             "mlt.qf" "text^2"
-                                             "wt"  "json"
-                                             }
-                                   :headers {"Content-Type" "application/json"}
+                                                 "rows" "300"
+                                                 "mlt.qf" "text^2"
+                                                 "wt"  "json"
+                                                 }
+                                       :headers {"Content-Type" "application/json"}
 
-                                   :body (cheshire.core/generate-string
-                                           (-> news (assoc :title (:title news)
-                                                           :text (ChineseUtils/toTraditional
-                                                                   (:content news)))))}))
-            body (cheshire.core/parse-string body true)]
-        (info (:interestingTerms body))
-        (map (fn [doc] (let [title (:title doc)]
-                         (if (and title
-                                  (not (string? title))
-                                  (seq title))
-                           (assoc doc :title (first title))
-                           doc
-                           )
-                         )) (:docs (:response body)))))
+                                       :body (json/generate-string
+                                               (-> news (assoc :title (:title news)
+                                                               :text (ChineseUtils/toTraditional
+                                                                       (:content news)))))}))
+                body (json/parse-string body true)]
+            (info (:interestingTerms body))
+            (map (fn [doc] (let [title (:title doc)]
+                             (if (and title
+                                      (not (string? title))
+                                      (seq title))
+                               (assoc doc :title (first title))
+                               doc
+                               )
+                             )) (:docs (:response body)))))
 
   )
 
 (defn normalize [coll]
-  (info coll)
   (if (seq coll)
     (if (> (count coll) 1)
       (let [avg (/ (apply + coll) (count coll))
             sd-square (/ (apply + (map #(Math/pow (double (- avg %)) 2) coll)) (count coll))]
-        (info sd-square)
         (if (not= sd-square 0.0)
           (map #(/ (- % avg) (Math/sqrt sd-square)) coll)
           (repeat (count  coll) 0)
@@ -110,14 +76,25 @@
   (+ (* n-pop 2) (* n-score 5) (* n-recent 10))
   )
 
-(defn excellent-article? [{:keys [push dislike length title]}]
-  (and (> (or push 0) 100)
-       (> (/ (or push 0) (+ (or push 0) (or dislike 0))) 0.8)
-       (> (or length 0) 300)
-       (not (re-matches #"^(Fw:)?\s*\[?新聞\]?.*" (or title "")))
-       (not (re-matches #"^(Fw:)?\s*\[?問卦\]?.*" (or title "")))
-       )
+
+(defn excellent-article? [{:keys [push dislike length title popularity]}]
+  (and
+    (not (re-matches #"^(Fw:)?\s*\[?新聞\]?.*" (or title "")))
+    (not (re-matches #"^(Fw:)?\s*\[?問卦\]?.*" (or title "")))
+    (or
+      (and
+        (> (or push 0) 50)
+        (> (/ (or push 0) (+ (or push 0) (or dislike 0))) 0.8)
+        (> (or length 0) 150)
+        )
+      (and
+        (> (or popularity 0) 50)
+        (> (or push 0) 20)
+        (> (/ (or push 0) (+ (or push 0) (or dislike 0))) 0.95)
+        (> (or length 0) 400)
+        )))
   )
+
 
 
 (defn search-handler [req]
@@ -127,6 +104,13 @@
                   (if (and title content)
                     (go (try
                           (let [matches (filter #(> (:score %) 0.15) (<? (get-more-like-this news 1)))
+                                ; make sure there is no nil
+                                matches (map (fn [{:keys [push dislike arrow popularity] :as m}]
+                                               (assoc m :push (or push 0)
+                                                        :dislike (or dislike 0)
+                                                        :arrow (or arrow 0)
+                                                        :popularity (or popularity 0))
+                                               ) matches)
                                 matches (map (fn [pop push score recent match]
                                                (assoc match
                                                       :n-pop pop
@@ -144,12 +128,16 @@
                                                                #(t/to-time-zone % (DateTimeZone/forID "Asia/Taipei"))
                                                                c/from-string :last_modified) matches))
                                              matches)
+
                                 matches (reverse (sort-by order-weight matches))
 
                                 best-match (first (reverse (sort-by best-match-weight
                                                                     (filter (fn [{:keys [title]}]
-                                                                              (and (not= title "") (not (re-matches #"^Re:.*" title))) )
+                                                                              (and (not= title "")
+                                                                                   (not= title nil)
+                                                                                   (not (re-matches #"^Re:.*" title))) )
                                                                             matches))))
+
                                 excellent-articles (take 3 (reverse (sort-by :last_modified (filter excellent-article? matches))))
                                 excellent-article-ids (into #{} (map :id excellent-articles))
                                 response (-> {:articles
@@ -169,9 +157,10 @@
                             (info "Served request:" req "in" (/ (- (System/nanoTime) start-time) 1e6))
                             )
                           (catch Exception e (do (error e "search error!" req)
-                                                 {:status 400
-                                                  :body (cheshire.core/generate-string
-                                                          {:reason "Something went wrong..."}) }
+                                                 (send! channel {:status 400
+                                                                 :body (cheshire.core/generate-string
+                                                                         {:reason "Something went wrong..."}) })
+
                                                  ))
                           )
                         )
@@ -184,34 +173,5 @@
 
                 )
   )
-
-
-(defn handler [{:keys [uri] :as req}]
-  (cond
-    (= uri "/search")
-      (search-handler req)
-    (= uri "/health")
-      (with-channel req channel
-        (async-get "http://localhost:8983/solr/collection1/admin/ping?wt=json" {}
-                   #(send! channel {:status (or (:status %) 503)
-                                    :body (or (:body %) "") }))
-      )
-    )
-  ) ;; all other, return 404
-
-(defn stop-server []
-  (when-not (nil? @server)
-    ;; graceful shutdown: wait 100ms for existing requests to be finished
-    ;; :timeout is optional, when no timeout, stop immediately
-    (@server :timeout 100)
-    (reset! server nil)))
-
-
-
-(defn start  [port]
-  (stop-server)
-  (reset! server (run-server #'handler {:port port}))
-  )
-
 
 

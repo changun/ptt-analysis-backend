@@ -19,7 +19,7 @@
             [clojure.tools.nrepl :as repl]
             )
   (:require [amazonica.aws.s3 :as s3]
-            [ptt-analysis.yahoo :as server])
+            [ptt-analysis.server :as server])
   (:use ptt-analysis.async
         [clojure.tools.nrepl.server :only (start-server stop-server)]
   ))
