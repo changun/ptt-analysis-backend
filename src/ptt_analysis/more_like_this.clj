@@ -30,10 +30,8 @@
                                                  }
                                        :headers {"Content-Type" "application/json"}
 
-                                       :body (json/generate-string
-                                               (-> news (assoc :title (:title news)
-                                                               :text (ChineseUtils/toTraditional
-                                                                       (:content news)))))}))
+                                       :body (ChineseUtils/toTraditional
+                                               (apply str (:content news) (repeat 5 (:title news))))}))
                 body (json/parse-string body true)]
             (info (:interestingTerms body))
             (map (fn [doc] (let [title (:title doc)]
@@ -76,20 +74,25 @@
   (+ (* n-pop 2) (* n-score 5) (* n-recent 10))
   )
 
+(defn push-rate [{:keys [push last_modified]}]
+  (/ (or push 0) (t/in-minutes (t/interval (c/from-string last_modified) (t/now))))
+  )
 
-(defn excellent-article? [{:keys [push dislike length title popularity]}]
+(defn excellent-article? [{:keys [push dislike length title popularity push-rate]}]
   (and
     (not (re-matches #"^(Fw:)?\s*\[?新聞\]?.*" (or title "")))
     (not (re-matches #"^(Fw:)?\s*\[?問卦\]?.*" (or title "")))
     (or
       (and
-        (> (or push 0) 50)
+        (or (> (or push 0) 50)
+            (and (> (or push 0) 20) (> push-rate 0.2)))
         (> (/ (or push 0) (+ (or push 0) (or dislike 0))) 0.8)
         (> (or length 0) 150)
         )
       (and
         (> (or popularity 0) 50)
-        (> (or push 0) 20)
+        (or (> (or push 0) 30)
+            (and (> (or push 0) 10) (> push-rate 0.2)))
         (> (/ (or push 0) (+ (or push 0) (or dislike 0))) 0.95)
         (> (or length 0) 400)
         )))
@@ -111,6 +114,9 @@
                                                         :arrow (or arrow 0)
                                                         :popularity (or popularity 0))
                                                ) matches)
+
+
+                                matches (map (fn [m] (assoc m :push-rate (push-rate m)) ) matches)
                                 matches (map (fn [pop push score recent match]
                                                (assoc match
                                                       :n-pop pop
@@ -125,8 +131,10 @@
                                              (normalize (map (comp
                                                                c/to-epoch
                                                                #(.withTimeAtStartOfDay ^DateTime %)
-                                                               #(t/to-time-zone % (DateTimeZone/forID "Asia/Taipei"))
-                                                               c/from-string :last_modified) matches))
+                                                               #(t/to-time-zone %(DateTimeZone/forID "Asia/Taipei"))
+                                                               c/from-string
+                                                               :last_modified
+                                                               ) matches))
                                              matches)
 
                                 matches (reverse (sort-by order-weight matches))
