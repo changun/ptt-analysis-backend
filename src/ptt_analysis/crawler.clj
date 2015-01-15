@@ -40,16 +40,19 @@
                               "MenTalk" "feminine_sex" "lesbian" "CATCH" "graduate" "HardwareSale" "Hsinchu" "MayDay"]))
 (def pool-size 4)
 (def ^:dynamic board "Gossiping")
+
 (def options {:timeout 20000             ; ms
               :user-agent "I-am-an-ptt-crawler"
               :basic-auth ["pttrocks" "Cens0123!"]
               :insecure? true
               :headers {"cookie" "over18=1;"}})
+
+
 (def cred (read-string (slurp "aws.cred")))
 
 
 
-(defn async-get [& args]
+(defn async-get-and-retry [& args]
   (go (let [ch (chan 1)]
         (loop  []
           (apply http/get (concat  args [#(if (or (:error %) (= (:status %) 503))
@@ -164,7 +167,7 @@
   )
 
 (defn get-posts-in-page [page-no]
-  (go-try (let [raw-body (<? (async-get (format "http://www.ptt.rocks/bbs/%s/index%d.html" board page-no) options))
+  (go-try (let [raw-body (<? (async-get-and-retry (format "http://www.ptt.rocks/bbs/%s/index%d.html" board page-no) options))
                 body (html/html-snippet raw-body)
                 posts (parse-posts body)]
             posts
@@ -172,7 +175,7 @@
 
 (defn get-post [post]
   (go-try (try
-            (let [raw-body (<? (async-get (format "http://www.ptt.rocks/bbs/%s/%s.html" board post) options))
+            (let [raw-body (<? (async-get-and-retry (format "http://www.ptt.rocks/bbs/%s/%s.html" board post) options))
                   body (html/html-snippet raw-body)
                   {:keys [author title time ip content]} (parse-author-title-time body)
                   pushes (parse-pushes body)
@@ -214,7 +217,7 @@
 
 
 (defn get-boards []
-  (let [hot-boards (map html/text (html/select (html/html-snippet (<!! (async-get "https://www.ptt.cc/hotboard.html" options))) [:tr (html/nth-child 2) :a]))]
+  (let [hot-boards (map html/text (html/select (html/html-snippet (<!! (async-get-and-retry "https://www.ptt.cc/hotboard.html" options))) [:tr (html/nth-child 2) :a]))]
     (into #{} (concat default-boards hot-boards))
     )
   )
@@ -239,7 +242,7 @@
     ))
 (defn post-seq
   ([board]
-   (let [raw-body (<!! (async-get (format "http://www.ptt.rocks/bbs/%s/" board) options))
+   (let [raw-body (<!! (async-get-and-retry (format "http://www.ptt.rocks/bbs/%s/" board) options))
          body (html/html-snippet raw-body)
          ; get number of pages
          pages  (parse-pages body)
@@ -342,27 +345,31 @@
      :solr solr})
   )
 (defn fetch-posts [ago]
-  (profile :info (keyword (str "fetch-post-time" ago))
-           (doseq [board-name (get-boards) ]               ;
-             (let [min-time  (t/minus (t/now) ago)]
-               (binding [board board-name]
-                 (loop [[p & posts] (post-seq board) count 0 update 0]
-                   ;(p :save-to-psql (db/save-post p))
-                   (trace ago p)
-                   (let [{:keys [s3 solr] :as update-ret} (try (upload p) (catch Exception e e))]
-                     (cond
-                       (error? update-ret)
-                         (do (error update-ret p "Upload to solr or s3 failed...")
-                             (Thread/sleep 10000)
-                             (recur (concat [p] posts) count update))
-                       (and (t/after?  (:time p) min-time) (seq posts))
-                          (recur posts (inc count) (+ update s3))
-                       :else
-                        (info (format "[%s] %s Done %s Posts %s Updated, Last Post %s" ago board count update (:time p)))
+  (try
+    (profile :info (keyword (str "fetch-post-time" ago))
+             (doseq [board-name (get-boards) ]               ;
+               (let [min-time  (t/minus (t/now) ago)]
+                 (binding [board board-name]
+                   (try
+                     (loop [[p & posts] (post-seq board) count 0 update 0]
+                       (let [{:keys [s3 solr] :as update-ret} (try (upload p) (catch Exception e e))]
+                         (cond
+                           (error? update-ret)
+                             (do (error update-ret p "Upload to solr or s3 failed...")
+                                 (Thread/sleep 10000)
+                                 (recur (concat [p] posts) count update))
+                           (and  (or (t/after?  (:time p) min-time) (< count 20))
+                                 (seq posts))
+                            (recur posts (inc count) (+ update s3))
+                           :else
+                            (info (format "[%s] %s Done %s Posts %s Updated, Last Post %s" ago board count update (:time p)))
+                           )
+                         )
                        )
-                     )
-                   ))
-               )))
+                     (catch Exception e (error e))))
+                 )))
+    (catch Exception e (error e))
+    )
   )
 
 (defn periodic-fetch-posts [ago delay]
@@ -385,7 +392,7 @@
       (do (info "start crawler")
           (thread (periodic-fetch-posts (t/days 7)  60000))
           (thread (periodic-fetch-posts (t/hours 24)  1000))
-          (thread (periodic-fetch-posts (t/hours 2)   1000)))
+          (thread (periodic-fetch-posts (t/hours 6)   1000)))
     )
     (if (contains? args "server")
       (do (info "start server")
