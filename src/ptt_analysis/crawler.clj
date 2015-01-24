@@ -2,7 +2,9 @@
   (:import (org.joda.time DateTimeZone DateTime)
            (java.io ByteArrayInputStream)
            (com.amazonaws.services.s3.model AmazonS3Exception)
-           (com.luhuiguo.chinese ChineseUtils))
+           (com.luhuiguo.chinese ChineseUtils)
+           (java.net URISyntaxException)
+           (org.joda.time.format DateTimeFormatter))
   (:require [org.httpkit.client :as http]
             [clojure.core.async :refer [chan <! go put! <!! >! thread] :as async]
             [net.cgrand.enlive-html :as html]
@@ -16,13 +18,9 @@
              :refer (pspy pspy* profile defnp p p*)]
             [taoensso.timbre.appenders.carmine :as car-appender]
             [clj-time.coerce :as c]
-            [clojure.tools.nrepl :as repl]
+            [amazonica.aws.s3 :as s3]
             )
-  (:require [amazonica.aws.s3 :as s3]
-            [ptt-analysis.server :as server])
-  (:use ptt-analysis.async
-        [clojure.tools.nrepl.server :only (start-server stop-server)]
-  ))
+  (:use ptt-analysis.async))
 ; set redis appender
 (timbre/set-config! [:appenders :carmine] (car-appender/make-carmine-appender))
 
@@ -37,7 +35,7 @@
                               "Kaohsiung" "Aviation" "MakeUp" "ONE_PIECE" "Wanted" "TaichungBun" "SuperJunior"
                               "creditcard" "Japandrama" "HelpBuy" "gay" "GetMarry" "Examination" "PathofExile"
                               "japanavgirls" "BeautySalon" "Salary" "PC_Shopping" "Option" "SportLottery"
-                              "MenTalk" "feminine_sex" "lesbian" "CATCH" "graduate" "HardwareSale" "Hsinchu" "MayDay"]))
+                              "MenTalk" "feminine_sex" "lesbian" "CATCH" "graduate" "HardwareSale" "Hsinchu" "MayDay" "PublicIssue"]))
 (def pool-size 4)
 (def ^:dynamic board "Gossiping")
 
@@ -56,15 +54,22 @@
   (go (let [ch (chan 1)]
         (loop  []
           (apply http/get (concat  args [#(if (or (:error %) (= (:status %) 503))
-                                           (put! ch (Exception. (str "Query " args "Error:" %)))
+                                           (put! ch (or (:error %) (Exception. (str %))))
                                            (put! ch (:body %)))]))
           (let [ret (<! ch)]
-            (if (error? ret)
-              (do
-                (warn ret "Retry:" args " Message:" ret)
-                (Thread/sleep 60000)
-                (recur))
-              ret
+            (cond
+              (= (type ret) URISyntaxException)
+                (do
+                  (warn ret "Wrong URI" args " Message:" ret)
+                  nil
+                  )
+              (error? ret)
+                (do
+                  (warn ret "Retry:" args " Message:" ret)
+                  (Thread/sleep 60000)
+                  (recur))
+              :else
+                ret
               )
             ))
         ))
@@ -94,16 +99,8 @@
             ))
   )
 
-(defn parse-pages [body]
-  (inc (read-string (second (re-find #"index(\d+)" (get-in (second (html/select body [:a.btn.wide])) [:attrs :href])))))
-  )
-(defn parse-posts [body]
-  (let [posts (html/select body [:div.title :> :a])]
-    (map #(let [html (last (clojure.string/split (get-in % [:attrs :href]) #"/" ))
-                post (subs html 0 (- (count html) 5))]
-           post) posts))
 
-  )
+
 (defn parse-content [body]
   (let [content-div (:content (into {} (html/select body [:#main-content])))
         article-content (filter (fn [%]
@@ -119,6 +116,7 @@
     (clojure.string/join " " article-content)
     )
   )
+
 (defn parse-real-content-length [body]
   (->> (html/select  body  [:#main-content])
        (first)
@@ -165,17 +163,23 @@
     )
 
   )
+(defn get-fb-stats [board id]
+   (go
+     (let [fb-ret (<! (async-get-and-retry (format "http://api.facebook.com/restserver.php?method=links.getStats&urls=https://www.ptt.cc/bbs/%s/%s.html&format=json" board id)))]
+       (-> fb-ret
+           (json/parse-string true)
+           (first)
+           )
+       )
+     )
+  )
 
-(defn get-posts-in-page [page-no]
-  (go-try (let [raw-body (<? (async-get-and-retry (format "http://www.ptt.rocks/bbs/%s/index%d.html" board page-no) options))
-                body (html/html-snippet raw-body)
-                posts (parse-posts body)]
-            posts
-            )))
-
-(defn get-post [post]
+(defn process-post [post]
   (go-try (try
             (let [raw-body (<? (async-get-and-retry (format "http://www.ptt.rocks/bbs/%s/%s.html" board post) options))
+                  {:keys [share_count like_count comment_count click_count] :as fb}
+                  (<? (get-fb-stats board post))
+                  _ (info fb)
                   body (html/html-snippet raw-body)
                   {:keys [author title time ip content]} (parse-author-title-time body)
                   pushes (parse-pushes body)
@@ -190,17 +194,32 @@
                :ip ip
                :content content
                :length length
+               :content-links (map html/text (html/select body [:#main-content :> :a]))
+               :push-links  (map html/text (html/select body [:#main-content :.push :a]))
+               :fb-share-count share_count
+               :fb-like-count like_count
+               :fb-comment-count comment_count
+               :fb-click-count click_count
                :raw-body raw-body}
               )
             (catch Exception e
               (do (trace e (str board ":" post)) nil)))))
 
 (defn process-page [page-no]
-  (go-try (let [posts (<? (get-posts-in-page page-no))
+
+  (go-try (let [get-posts-in-page (fn [page-no]
+                      (go-try (let [raw-body (<? (async-get-and-retry (format "http://www.ptt.rocks/bbs/%s/index%d.html" board page-no) options))
+                                    body (html/html-snippet raw-body)
+                                    posts (for [post-uri (html/select body [:div.title :> :a])]
+                                            (let [html (last (clojure.string/split (get-in post-uri [:attrs :href]) #"/" ))]
+                                              (subs html 0 (- (count html) 5))))]
+                                   posts
+                                   )))
+                posts (<? (get-posts-in-page page-no))
                 pool (chan pool-size)
                 chs (loop [[cur & rests] posts chs []]
                       (if cur
-                        (recur rests (conj chs (run-async-with-buffer #(get-post cur) pool)))
+                        (recur rests (conj chs (run-async-with-buffer #(process-post cur) pool)))
                         chs
                         )
                       )]
@@ -209,19 +228,11 @@
             )))
 
 (defn str->time [str]
-  (try (let [time (.parseDateTime (.withZone (f/formatter "E MMM dd HH:mm:ss yyyy") (DateTimeZone/forID "Asia/Taipei"))
+  (try (let [time (.parseDateTime ^DateTimeFormatter (.withZone (f/formatter "E MMM dd HH:mm:ss yyyy") (DateTimeZone/forID "Asia/Taipei"))
                                   (clojure.string/replace str #"\s+" " ")
                                   )]
          (if (t/before? time (t/date-time 2000)) nil time))
        (catch Exception e nil)) )
-
-
-(defn get-boards []
-  (let [hot-boards (map html/text (html/select (html/html-snippet (<!! (async-get-and-retry "https://www.ptt.cc/hotboard.html" options))) [:tr (html/nth-child 2) :a]))]
-    (into #{} (concat default-boards hot-boards))
-    )
-  )
-
 
 (defn process-posts-in-page [page board]
   (loop [page page board board]
@@ -245,7 +256,7 @@
    (let [raw-body (<!! (async-get-and-retry (format "http://www.ptt.rocks/bbs/%s/" board) options))
          body (html/html-snippet raw-body)
          ; get number of pages
-         pages  (parse-pages body)
+         pages  (inc (read-string (second (re-find #"index(\d+)" (get-in (second (html/select body [:a.btn.wide])) [:attrs :href])))))
          ]
      (post-seq board pages)
      ))
@@ -258,7 +269,8 @@
   )
 
 (defn upload-to-solr [posts]
-  (let [posts (map (fn [{:keys [_id title content author time board pushed length] :as p}]
+  (let [posts (map (fn [{:keys [_id title content author time board pushed length content-links push-links
+                                fb-like-count fb-comment-count fb-click-count fb-share-count] :as p}]
 
                      (let [freqs (frequencies (map :op pushed))
                            pushes (or (get freqs "推") 0)
@@ -277,8 +289,14 @@
                           :push pushes
                           :dislike dislike
                           :arrow arrow
+                          :fb-like-count fb-like-count
+                          :fb-comment-count fb-comment-count
+                          :fb-click-count fb-click-count
+                          :fb-share-count fb-share-count
                           :length length
                           :board board
+                          :content-links content-links
+                          :push-links   push-links
                           :isReply (not (nil? (re-matches #"^Re.*" (or title ""))))
                           :last_modified (c/to-string time)}
                          (catch Exception e (warn e p)
@@ -344,6 +362,12 @@
     {:s3  s3
      :solr solr})
   )
+
+(defn get-boards []
+  (let [hot-boards (map html/text (html/select (html/html-snippet (<!! (async-get-and-retry "https://www.ptt.cc/hotboard.html" options))) [:tr (html/nth-child 2) :a]))]
+    (into #{} (concat default-boards hot-boards))
+    )
+  )
 (defn fetch-posts [ago]
   (try
     (profile :info (keyword (str "fetch-post-time" ago))
@@ -380,28 +404,9 @@
     )
   )
 
+(defn start []
+  (thread (periodic-fetch-posts (t/days 30)  60000))
+  (thread (periodic-fetch-posts (t/hours 24)  1000))
+  (thread (periodic-fetch-posts (t/hours 2)   1000)))
 
-
-(defonce server (start-server :port 9098))
-
-(defn -main
-  [& args]
-  (let [args (into #{} args)]
-    (info args)
-    (if (contains? args "crawler")
-      (do (info "start crawler")
-          (thread (periodic-fetch-posts (t/days 7)  60000))
-          (thread (periodic-fetch-posts (t/hours 24)  1000))
-          (thread (periodic-fetch-posts (t/hours 6)   1000)))
-    )
-    (if (contains? args "server")
-      (do (info "start server")
-          (server/start 8089)))
-    )
-  (info "sleep forever...")
-    (loop []
-      (Thread/sleep 10000)
-      (recur))
-
-)
 
