@@ -114,8 +114,14 @@
                                                         :arrow (or arrow 0)
                                                         :popularity (or popularity 0))
                                                ) matches)
-
-
+                                ; set a cap on popularity
+                                matches (map (fn [{:keys [push dislike arrow popularity] :as m}]
+                                               (assoc m
+                                                      :push (if (> push 150) 150 push)
+                                                      :dislike (if (> dislike 150) 150 dislike)
+                                                      :arrow (if (> arrow 150) 150 arrow)
+                                                      :popularity (if (> popularity 200) 200 popularity))
+                                               ) matches)
                                 matches (map (fn [m] (assoc m :push-rate (push-rate m)) ) matches)
                                 matches (map (fn [pop push score recent match]
                                                (assoc match
