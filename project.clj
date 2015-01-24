@@ -6,7 +6,7 @@
   :jvm-opts ["-Xmx1g" "-server" "-XX:-OmitStackTraceInFastThrow"]
 
   ;:aot [ptt-analysis.server]
-  :main ptt-analysis.crawler
+  :main ptt-analysis.main
   :dependencies [[org.clojure/clojure "1.6.0"]
                  [http-kit "2.1.16"]
                  [org.clojure/core.async "0.1.346.0-17112a-alpha"]
