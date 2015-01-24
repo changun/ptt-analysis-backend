@@ -2,7 +2,8 @@
 
   (:require [clojure.core.async :refer [chan <! go put! <!! >!]]
             [ring.middleware.cors :refer [wrap-cors]]
-            [ptt-analysis.more-like-this :as more-like-this])
+            [ptt-analysis.more-like-this :as more-like-this]
+            [ptt-analysis.latest-popular :as latest-popular])
   (:use org.httpkit.server)
   (:use [ring.middleware.params         :only [wrap-params]]
         [ring.middleware.json :only [wrap-json-response]]
@@ -17,6 +18,8 @@
   (cond
     (= uri "/search")
       (more-like-this/search-handler req)
+    (= uri "/latest")
+      (latest-popular/latest-popular-handler req)
     (= uri "/health")
       (with-channel req channel
         (async-get "http://localhost:8983/solr/collection1/admin/ping?wt=json" {}
