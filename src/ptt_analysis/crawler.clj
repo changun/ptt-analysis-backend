@@ -1,20 +1,14 @@
 (ns ptt-analysis.crawler
-  (:import (org.joda.time DateTimeZone DateTime)
+  (:import (org.joda.time DateTimeZone)
            (java.io ByteArrayInputStream InputStream)
            (com.amazonaws.services.s3.model AmazonS3Exception)
            (com.luhuiguo.chinese ChineseUtils)
            (org.joda.time.format DateTimeFormatter)
            (com.fasterxml.jackson.databind.util ByteBufferBackedInputStream)
 
-           (java.nio ByteBuffer)
-           (com.squareup.okhttp OkHttpClient Request$Builder)
-           (java.security SecureRandom)
-           (javax.net.ssl SSLContext X509TrustManager)
-           (java.security.cert X509Certificate)
-           (java.net SocketException)
-           (org.httpkit BytesInputStream))
+           (java.nio ByteBuffer))
   (:require [org.httpkit.client :as http]
-            [clojure.core.async :refer [chan <! go put! <!! >! thread] :as async]
+            [clojure.core.async :refer [chan <! go put! <!! >! thread]]
             [net.cgrand.enlive-html :as html]
             [clj-time.core :as t]
             [clj-time.format :as f]
@@ -22,8 +16,7 @@
             [taoensso.timbre :as timbre
              :refer (log info warn error trace)]
             [cheshire.core :as json]
-            [taoensso.timbre.profiling :as profiling
-             :refer (pspy pspy* profile defnp p p*)]
+            [taoensso.timbre.profiling :refer (pspy pspy* profile defnp p p*)]
             [clj-time.coerce :as c]
             [amazonica.aws.s3 :as s3]
             [amazonica.aws.lambda :as lambda]
@@ -49,9 +42,6 @@
 
 
 (def get-cred (memoize (fn [] (clojure.edn/read-string (slurp "aws.cred")))) )
-; client that trust all certificates
-
-
 
 
 (defn lambda-invoke [payload]
@@ -68,6 +58,9 @@
                     (json/generate-string)
 
                     )
+        ; there is a bug in Lambda wrapper in determinig the payload type
+        ; here we walkaround the bug by try usign String first,
+        ; if it does not work, then use nio ByteBuffer
         {:keys [status-code payload]} (try (lambda-invoke payload)
                                            (catch Exception _
                                              (lambda-invoke (-> payload
@@ -84,55 +77,66 @@
       )
     )
   )
-
 (defn ptt-endpoint-local
-  "Make http request to ptt.cc via local machine"
+  "Make http request to ptt.cc via distributed proxies"
   [path]
-  @(http/get (str "http://localhost/ptt-proxy" path)
+  @(http/get (str "http://localhost/proxies/proxy?url=https://www.ptt.cc" path)
              {:headers {"cookie" "over18=1;"}
               :basic-auth ["pttrocks" "Cens0123!"]
               :timeout 10000             ; ms
               :user-agent "I-am-an-ptt-crawler"
               :insecure? true})
-)
+  )
 (def ptt-endpoint
-  (let [speed-meter (atom [])
-        total-count (atom 0)]
+  "The main endpoint to ptt. It optimize the performance by using mutiple way to access ptt pages,
+  including AWS Lambda function and distributed proxy servers (see http://github.com/changun/proxy).
+  It handlers auto-try with expotential backoff and periodically print performance metrics.
+  "
+  ; performance metrics
+  (let [speed-meter (atom 0)
+        total-count (atom 0)
+        error-count (atom 0)]
     (fn [path]
       (let [start (t/now)]
         (loop [fail 0 force-local false]
+          ; favor lamdba endpoint becuase it is cheaper?
+          ; when force-local, always use local endpoint as some large page is only accessible via local endpoint
           (let [{:keys [status body] :as ret} (try (if (and (> (rand) 0.1 ) (not force-local))
                                                 (ptt-endpoint-lambda path)
-                                                (ptt-endpoint-local path)
-
-                                                )
+                                                (ptt-endpoint-local path))
                                               (catch Exception e {:error e}))
+                ; slurp the body if needed
                 ret (cond-> ret
                         (and body (isa? (class body) InputStream))
                         (assoc :body (slurp body)))
                 ]
-
             (cond
+              ; Lambda return "Connection reset by peer", which occur when the page is too large for lambda to fecth.
+              ; Try again with local endpoint
               (= (:error ret) "read ECONNRESET")
-              (recur (inc fail) true)
-              (or (#{503 500 502} status)
-                    (:error ret)
-                    (not status))
-              (let [wait (min (* 1000 60 20) (* (Math/pow 1.5 fail) 500))]
-                (if-not (= status 503)
-                  (error (:error ret) ret path "Retry in " wait "ms"))
-                (Thread/sleep wait)
-                (recur (inc fail) force-local))
-
+                (recur (inc fail) true)
+              ; for server error or any other kind of exception (not including 404)
+              ; retry with expotential backoff
+              (or (#{503 500 502} status) (:error ret) (not status))
+                (let [wait (min (* 1000 60 20) (* (Math/pow 1.5 fail) 500))]
+                  (if-not (= status 503)
+                    (do (comment (error (:error ret) ret path "Retry in " wait "ms")))
+                    )
+                  (swap! error-count inc)
+                  (Thread/sleep wait)
+                  (recur (inc fail) force-local))
+              ; success! update performance metrics and return the response
               :default
               (do
-                (swap! speed-meter
-                       #(-> %
-                            (cond-> (> (count %) 100) (rest))
-                            (conj (t/in-millis (t/interval start (t/now))))))
+                (swap! speed-meter + (t/in-millis (t/interval start (t/now))))
                 (swap! total-count inc)
-                (if (= 0 (mod @total-count 1000))
-                  (info (format "Average response time %s" (float (/ (apply + @speed-meter) (count @speed-meter)))))
+                ; print metric every 1000 requests
+                (when (= 0 (mod @total-count 1000))
+                  (info (format "Average response time %s Average error rate %s"
+                                (float (/ @speed-meter 1000))
+                                (float (/ @error-count 1000))))
+                  (reset! speed-meter 0)
+                  (reset! error-count 0)
                   )
                 ret
                 )
@@ -388,8 +392,6 @@
                                  :metadata {:content-length length}
                                  :return-values "ALL_OLD")]
           (trace key ret))
-
-
           1)
       (do (trace "Key:" key "did not change.")
           0)
@@ -401,9 +403,8 @@
 
 (defn fetch-posts [board ago]
   (let [min-time  (t/minus (t/now) ago)
-        posts (take-while #(t/after?  (:time %) min-time) (post-seq board))]
-    (loop [[p & ps :as posts] posts count 0 update 0]
-
+        all-posts (take-while #(t/after?  (:time %) min-time) (post-seq board))]
+    (loop [[p & ps :as posts] all-posts count 0 update 0]
       (if p
         (let [ret (try
                     (upload-to-solr [p])
@@ -418,9 +419,11 @@
             )
 
           )
-        (info (format "[%s] %s Done %s Posts %s Updated, Last Post %s" ago board count update (:time p)))
+        (info (format "[%s] %s Done %s Posts %s Updated, Last Post %s" ago board count update (:time (last all-posts))))
         )
+
       )
+
     )
   )
 
@@ -442,7 +445,9 @@
     (try
       (profile :info (keyword (str "fetch-post-time" ago))
                (doseq [board (get-boards)]
-                 (fetch-posts board ago)
+                 (try
+                   (fetch-posts board ago)
+                   (catch Exception e (error e)))
                  ))
       (catch Exception e (error e))
       )

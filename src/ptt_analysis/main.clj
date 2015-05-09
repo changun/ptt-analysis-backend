@@ -15,16 +15,13 @@
   (let [args (into #{} args)]
     (if (contains? args "crawler")
       (do (println "start crawler")
+          (start-server :port 9098)
           (crawler/start))
       )
     (if (contains? args "server")
       (do (println "start server at port 9098")
+          (start-server :port 9099)
           (server/start 8089)))
-    (if (contains? args "proxy")
-      (do (println "start proxy at port 9999")
-          (proxy/start 9999)))
-    (if (not (contains? args "proxy"))
-      (start-server :port 9098))
     )
   (println "sleep forever...")
   (loop []
