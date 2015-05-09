@@ -20,7 +20,7 @@
                                                 {"mlt.fl" "text,title"
                                                  "mlt.boost" "true"
                                                  "mlt.interestingTerms" "details"
-                                                 "fl" "id,title,score,popularity,last_modified,author,push,dislike,arrow,subject,length"
+                                                 "fl" "id,title,score,popularity,last_modified,author,push,dislike,arrow,subject,length,fb-share-count,fb-like-count,fb-comment-count,content-links"
                                                  "fq" ["last_modified:[NOW/DAY-60DAYS TO NOW/DAY+1DAY]"
                                                        (format "popularity:[%s TO *]" popularity)]
 
@@ -67,35 +67,38 @@
                        :status 200
 
                        })
-(defn order-weight [{:keys [n-pop n-push n-score n-recent]}]
-  (+ (* n-push 5)(* n-pop 3) (* n-score 5) (* n-recent 10))
+(defn order-weight [{:keys [n-pop n-push n-score n-recent n-fb-total]}]
+  (+ (* n-push 5)(* n-pop 3) (* n-score 5) (* n-recent 10) (* n-fb-total 7))
+  )
+(defn execellent-weight [{:keys [n-pop n-push n-score n-recent n-fb-total]}]
+  (+ (* n-push 10) (* n-score 5) (* n-recent 10) (* n-fb-total 7))
   )
 (defn best-match-weight [{:keys [n-pop n-score n-recent]}]
-  (+ (* n-pop 2) (* n-score 5) (* n-recent 10))
+  (+ (* n-pop 2) (* n-score 10) (* n-recent 8))
   )
 
 (defn push-rate [{:keys [push last_modified]}]
   (/ (or push 0) (t/in-minutes (t/interval (c/from-string last_modified) (t/now))))
   )
 
-(defn excellent-article? [{:keys [push dislike length title popularity push-rate]}]
+(defn image-urls [urls]
+
+  )
+
+(defn excellent-article? [{:keys [push dislike length title push-rate fb-total content-links]}]
   (and
     (not (re-matches #"^(Fw:)?\s*\[?新聞\]?.*" (or title "")))
     (not (re-matches #"^(Fw:)?\s*\[?問卦\]?.*" (or title "")))
-    (or
-      (and
-        (or (> (or push 0) 50)
-            (and (> (or push 0) 20) (> push-rate 0.2)))
-        (> (/ (or push 0) (+ (or push 0) (or dislike 0))) 0.8)
-        (> (or length 0) 150)
-        )
-      (and
-        (> (or popularity 0) 50)
-        (or (> (or push 0) 30)
-            (and (> (or push 0) 10) (> push-rate 0.2)))
-        (> (/ (or push 0) (+ (or push 0) (or dislike 0))) 0.95)
-        (> (or length 0) 400)
-        )))
+    (not (re-matches #"^(Fw:)?\s*\[?公告\]?.*" (or title "")))
+    (and
+      (or (> push 60)
+          (and (> push 20) (> push-rate 0.2))
+          (> fb-total 50)
+          )
+      (> (/ push (+ dislike push)) 0.7)
+      (or (> length 150)
+          (seq content-links))
+      ))
   )
 
 
@@ -108,11 +111,13 @@
                     (go (try
                           (let [matches (filter #(> (:score %) 0.15) (<? (get-more-like-this news 1)))
                                 ; make sure there is no nil
-                                matches (map (fn [{:keys [push dislike arrow popularity] :as m}]
+                                matches (map (fn [{:keys [push dislike arrow popularity length fb-share-count fb-comment-count fb-like-count] :as m}]
                                                (assoc m :push (or push 0)
                                                         :dislike (or dislike 0)
                                                         :arrow (or arrow 0)
-                                                        :popularity (or popularity 0))
+                                                        :popularity (or popularity 0)
+                                                        :length (or length 151)
+                                                        :fb-total (apply + (map #(or % 0) [fb-share-count fb-comment-count fb-like-count])))
                                                ) matches)
                                 ; set a cap on popularity
                                 matches (map (fn [{:keys [push dislike arrow popularity] :as m}]
@@ -123,17 +128,19 @@
                                                       :popularity (if (> popularity 200) 200 popularity))
                                                ) matches)
                                 matches (map (fn [m] (assoc m :push-rate (push-rate m)) ) matches)
-                                matches (map (fn [pop push score recent match]
+                                matches (map (fn [pop push score fb-total recent match]
                                                (assoc match
                                                       :n-pop pop
                                                       :n-push push
                                                       :n-score score
+                                                      :n-fb-total fb-total
                                                       :n-recent recent
                                                       )
                                                )
                                              (normalize (map :popularity matches))
                                              (normalize (map :push matches))
                                              (normalize (map :score matches))
+                                             (normalize (map :fb-total matches))
                                              (normalize (map (comp
                                                                c/to-epoch
                                                                #(.withTimeAtStartOfDay ^DateTime %)
@@ -152,7 +159,7 @@
                                                                                    (not (re-matches #"^Re:.*" title))) )
                                                                             matches))))
 
-                                excellent-articles (take 3 (reverse (sort-by :last_modified (filter excellent-article? matches))))
+                                excellent-articles (reverse (sort-by :last_modified (take 6 (reverse (sort-by execellent-weight  (filter excellent-article? matches))))))
                                 excellent-article-ids (into #{} (map :id excellent-articles))
                                 response (-> {:articles
                                               (->> matches

@@ -41,7 +41,7 @@
 
   (let [[board id] (clojure.string/split id #":")
         key (str "posts/" board "/" id ".html")]
-    (-> (s3/get-object ptt-analysis.crawler/cred
+    (-> (s3/get-object (crawler/get-cred)
                        :bucket-name "ptt.rocks"
                        :key key)
         (:input-stream)

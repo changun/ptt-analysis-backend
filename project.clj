@@ -3,9 +3,9 @@
   :url "http://example.com/FIXME"
   :license {:name "Eclipse Public License"
             :url "http://www.eclipse.org/legal/epl-v10.html"}
-  :jvm-opts ["-Xmx1g" "-server" "-XX:-OmitStackTraceInFastThrow"]
-
-  ;:aot [ptt-analysis.server]
+  :jvm-opts ["-Xmx1g" "-server" "-XX:-OmitStackTraceInFastThrow" ]
+  :profiles {:dev {:resource-paths ["resources"]}}
+  :aot [ptt-analysis.main]
   :main ptt-analysis.main
   :dependencies [[org.clojure/clojure "1.6.0"]
                  [http-kit "2.1.16"]
@@ -22,8 +22,11 @@
                  [korma "0.3.0"]
                  [org.postgresql/postgresql "9.2-1002-jdbc4"]
                  [com.luhuiguo/chinese-utils "1.0"]
-                 [amazonica "0.3.6"]
+                 [amazonica "0.3.22"]
                  [org.clojure/tools.nrepl "0.2.5"]
                  [com.taoensso/carmine "2.4.0"]
+                 [log4j/log4j "1.2.17"]
+                 [com.squareup.okhttp/okhttp "2.3.0"]
+
                  ])
 

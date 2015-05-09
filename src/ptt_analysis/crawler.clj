@@ -1,10 +1,18 @@
 (ns ptt-analysis.crawler
   (:import (org.joda.time DateTimeZone DateTime)
-           (java.io ByteArrayInputStream)
+           (java.io ByteArrayInputStream InputStream)
            (com.amazonaws.services.s3.model AmazonS3Exception)
            (com.luhuiguo.chinese ChineseUtils)
-           (java.net URISyntaxException)
-           (org.joda.time.format DateTimeFormatter))
+           (org.joda.time.format DateTimeFormatter)
+           (com.fasterxml.jackson.databind.util ByteBufferBackedInputStream)
+
+           (java.nio ByteBuffer)
+           (com.squareup.okhttp OkHttpClient Request$Builder)
+           (java.security SecureRandom)
+           (javax.net.ssl SSLContext X509TrustManager)
+           (java.security.cert X509Certificate)
+           (java.net SocketException)
+           (org.httpkit BytesInputStream))
   (:require [org.httpkit.client :as http]
             [clojure.core.async :refer [chan <! go put! <!! >! thread] :as async]
             [net.cgrand.enlive-html :as html]
@@ -16,13 +24,14 @@
             [cheshire.core :as json]
             [taoensso.timbre.profiling :as profiling
              :refer (pspy pspy* profile defnp p p*)]
-            [taoensso.timbre.appenders.carmine :as car-appender]
             [clj-time.coerce :as c]
             [amazonica.aws.s3 :as s3]
+            [amazonica.aws.lambda :as lambda]
+            [clojure.edn]
             )
   (:use ptt-analysis.async))
-; set redis appender
-(timbre/set-config! [:appenders :carmine] (car-appender/make-carmine-appender))
+
+
 
 (DateTimeZone/setDefault (DateTimeZone/forID "Asia/Taipei"))
 (def default-boards (into #{} ["Gossiping" "NBA" "sex" "LoL" "Stock" "Baseball"
@@ -36,70 +45,104 @@
                               "creditcard" "Japandrama" "HelpBuy" "gay" "GetMarry" "Examination" "PathofExile"
                               "japanavgirls" "BeautySalon" "Salary" "PC_Shopping" "Option" "SportLottery"
                               "MenTalk" "feminine_sex" "lesbian" "CATCH" "graduate" "HardwareSale" "Hsinchu" "MayDay" "PublicIssue"]))
-(def pool-size 4)
-(def ^:dynamic board "Gossiping")
-
-(def options {:timeout 20000             ; ms
-              :user-agent "I-am-an-ptt-crawler"
-              :basic-auth ["pttrocks" "Cens0123!"]
-              :insecure? true
-              :headers {"cookie" "over18=1;"}})
-
-
-(def cred (read-string (slurp "aws.cred")))
 
 
 
-(defn async-get-and-retry [& args]
-  (go (let [ch (chan 1)]
-        (loop  []
-          (apply http/get (concat  args [#(if (or (:error %) (= (:status %) 503))
-                                           (put! ch (or (:error %) (Exception. (str %))))
-                                           (put! ch (:body %)))]))
-          (let [ret (<! ch)]
-            (cond
-              (= (type ret) URISyntaxException)
-                (do
-                  (warn ret "Wrong URI" args " Message:" ret)
-                  nil
-                  )
-              (error? ret)
-                (do
-                  (warn ret "Retry:" args " Message:" ret)
-                  (Thread/sleep 60000)
-                  (recur))
-              :else
-                ret
-              )
-            ))
-        ))
-  )
+(def get-cred (memoize (fn [] (clojure.edn/read-string (slurp "aws.cred")))) )
+; client that trust all certificates
 
-(defn run-async-with-buffer [fn pool]
-  (go-try
-    ; park til there is available space in the pool
-    (>! pool "")
-    (let [ret (<? (fn))]
-      ; request finished, release one pool slot
-      (<! pool)
-      ; return response
-      ret
+
+
+
+(defn lambda-invoke [payload]
+  (lambda/invoke (get-cred)
+                 :function-name "httpRequest"
+                 :payload payload
+  ))
+(defn ptt-endpoint-lambda
+  "Make http request to ptt.cc via AWS Lambda"
+  [path]
+  (let [payload (-> {:host "www.ptt.cc"
+                     :path path
+                     :headers {"cookie" "over18=1;"}}
+                    (json/generate-string)
+
+                    )
+        {:keys [status-code payload]} (try (lambda-invoke payload)
+                                           (catch Exception _
+                                             (lambda-invoke (-> payload
+                                                                (.getBytes)
+                                                                (ByteBuffer/wrap)))))]
+    (if (= status-code 200)
+      (-> payload
+          (ByteBufferBackedInputStream.)
+          (clojure.java.io/reader)
+          (json/parse-stream true)
+          )
+      (do (error status-code payload)
+          {:error (str status-code payload)})
       )
     )
   )
-(defn take-all!
-  "return a coll containing every results take asyncronously from chs coll.
-  Note that the results are not return in order"
-  [chs]
-  (go-try (let [ch (clojure.core.async/merge chs)]
-            (loop [rets []]
-              (if-let [ret (<? ch)]
-                (recur (conj rets ret))
-                rets))
-            ))
+
+(defn ptt-endpoint-local
+  "Make http request to ptt.cc via local machine"
+  [path]
+  @(http/get (str "http://localhost/ptt-proxy" path)
+             {:headers {"cookie" "over18=1;"}
+              :basic-auth ["pttrocks" "Cens0123!"]
+              :timeout 10000             ; ms
+              :user-agent "I-am-an-ptt-crawler"
+              :insecure? true})
+)
+(def ptt-endpoint
+  (let [speed-meter (atom [])
+        total-count (atom 0)]
+    (fn [path]
+      (let [start (t/now)]
+        (loop [fail 0 force-local false]
+          (let [{:keys [status body] :as ret} (try (if (and (> (rand) 0.1 ) (not force-local))
+                                                (ptt-endpoint-lambda path)
+                                                (ptt-endpoint-local path)
+
+                                                )
+                                              (catch Exception e {:error e}))
+                ret (cond-> ret
+                        (and body (isa? (class body) InputStream))
+                        (assoc :body (slurp body)))
+                ]
+
+            (cond
+              (= (:error ret) "read ECONNRESET")
+              (recur (inc fail) true)
+              (or (#{503 500 502} status)
+                    (:error ret)
+                    (not status))
+              (let [wait (min (* 1000 60 20) (* (Math/pow 1.5 fail) 500))]
+                (if-not (= status 503)
+                  (error (:error ret) ret path "Retry in " wait "ms"))
+                (Thread/sleep wait)
+                (recur (inc fail) force-local))
+
+              :default
+              (do
+                (swap! speed-meter
+                       #(-> %
+                            (cond-> (> (count %) 100) (rest))
+                            (conj (t/in-millis (t/interval start (t/now))))))
+                (swap! total-count inc)
+                (if (= 0 (mod @total-count 1000))
+                  (info (format "Average response time %s" (float (/ (apply + @speed-meter) (count @speed-meter)))))
+                  )
+                ret
+                )
+              )
+            )
+
+          )
+
+        )))
   )
-
-
 
 (defn parse-content [body]
   (let [content-div (:content (into {} (html/select body [:#main-content])))
@@ -128,104 +171,89 @@
        )
   )
 (defn parse-author-title-time [body]
-  (let [eles (html/select body [:.article-meta-value])
-        [author _ title time] (map html/text eles)
-        author  (re-find #"^[^( ]+" author)
-        f2s (map html/text (html/select body [:.f2]))
-        ips (map #(re-find #"\d+\.\d+\.\d+\.\d+" %) f2s )
-        ips (filter seq ips)
-        ip (last ips)
-        content  (parse-content body)
-        ]
-
-       {:author author :title title :time time :ip ip :content content}
+  (if-let [headers (seq (html/select body [:.article-meta-value]))]
+    (let [[author _ title time] (map html/text headers)
+          author  (re-find #"^[^( ]+" author)
+          f2s (map html/text (html/select body [:.f2]))
+          ips (map #(re-find #"\d+\.\d+\.\d+\.\d+" %) f2s )
+          ips (filter seq ips)
+          ip (last ips)
+          content  (parse-content body)]
+      {:author author :title title :time time :ip ip :content content})
     )
 
   )
 
 (defn parse-pushes [body]
-  (let [ops (map html/text (html/select body [:.push :> :.push-tag]))
-        user-ids (map html/text (html/select body [:.push :> :.push-userid]))
-        ip-dates (map html/text (html/select body [:.push :> :.push-ipdatetime]))
-        contents (map html/text (html/select body [:.push :> :.push-content]))
-        ]
-    (if (= (count ops) (count user-ids) (count ip-dates) (count contents))
-      (map (fn [op user-id ip-date content]
-             {:op (clojure.string/trim op)
-              :user (clojure.string/trim user-id)
-              :ip-date (clojure.string/trim ip-date)
-              :content (apply str (drop-while #(or (= \space % ) (= \: %)) (or content "")))}
-             ) ops user-ids ip-dates contents)
-      (throw (Exception. "Push column counts are not consistent!" body))
-      )
+  (let [pushes (html/select body [:.push])
+        pushes (map (fn [push]
+                      (let [op (html/text (first (html/select push [:.push-tag])))
+                            user-id (html/text (first (html/select push [:.push-userid])))
+                            ip-date (html/text (first (html/select push [:.push-ipdatetime])))
+                            content  (html/text (first (html/select push [:.push-content])))
+                            ]
+                        (if (and (seq op) (seq user-id) )
+                          {:op (clojure.string/trim op)
+                           :user (clojure.string/trim user-id)
+                           :ip-date (clojure.string/trim ip-date)
+                           :content (apply str (drop-while #(or (= \space % ) (= \: %)) (or content "")))})
+                        )
+
+                      ) pushes)]
+    (filter identity pushes)
 
 
     )
 
   )
+
 (defn get-fb-stats [board id]
-   (go
-     (let [fb-ret (<! (async-get-and-retry (format "http://api.facebook.com/restserver.php?method=links.getStats&urls=https://www.ptt.cc/bbs/%s/%s.html&format=json" board id)))]
-       (-> fb-ret
-           (json/parse-string true)
-           (first)
-           )
-       )
-     )
+  (let [{:keys [body status]} @(http/get (format "http://api.facebook.com/restserver.php?method=links.getStats&urls=https://www.ptt.cc/bbs/%s/%s.html&format=json" board id)) ]
+    (if (= 200 status)
+      (-> body
+          (json/parse-string true)
+          (first)
+          )
+      (recur board id))
+    )
   )
 
-(defn process-post [post]
-  (go-try (try
-            (let [raw-body (<? (async-get-and-retry (format "http://www.ptt.rocks/bbs/%s/%s.html" board post) options))
-                  {:keys [share_count like_count comment_count click_count] :as fb}
-                  (<? (get-fb-stats board post))
-                  _ (info fb)
-                  body (html/html-snippet raw-body)
-                  {:keys [author title time ip content]} (parse-author-title-time body)
-                  pushes (parse-pushes body)
-                  length (parse-real-content-length body)]
+(defn process-post [board post]
+  (let [{:keys [status body]} (ptt-endpoint (format "/bbs/%s/%s.html" board post))]
+    (if (= 200 status)
+      (let [raw-body body
+            body (html/html-snippet body)
+            {:keys [author title time ip content]} (parse-author-title-time body)]
+        (if (and author title)
+          (let [{:keys [share_count like_count comment_count click_count] :as fb}
+                (get-fb-stats board post)
+                pushes (parse-pushes body)
+                length (parse-real-content-length body)]
+            {:_id post
+             :author author
+             :title title
+             :time time
+             :pushed pushes
+             :board board
+             :ip ip
+             :content content
+             :length length
+             :content-links (map html/text (html/select body [:#main-content :> :a]))
+             :push-links  (map html/text (html/select body [:#main-content :.push :a]))
+             :fb-share-count share_count
+             :fb-like-count like_count
+             :fb-comment-count comment_count
+             :fb-click-count click_count
+             :raw-body raw-body}
+            )
+          (trace "Skip" board post title " which has no auhtor")
+          )
+        ))
+    )
+  )
 
-              {:_id post
-               :author author
-               :title title
-               :time time
-               :pushed pushes
-               :board board
-               :ip ip
-               :content content
-               :length length
-               :content-links (map html/text (html/select body [:#main-content :> :a]))
-               :push-links  (map html/text (html/select body [:#main-content :.push :a]))
-               :fb-share-count share_count
-               :fb-like-count like_count
-               :fb-comment-count comment_count
-               :fb-click-count click_count
-               :raw-body raw-body}
-              )
-            (catch Exception e
-              (do (trace e (str board ":" post)) nil)))))
 
-(defn process-page [page-no]
 
-  (go-try (let [get-posts-in-page (fn [page-no]
-                      (go-try (let [raw-body (<? (async-get-and-retry (format "http://www.ptt.rocks/bbs/%s/index%d.html" board page-no) options))
-                                    body (html/html-snippet raw-body)
-                                    posts (for [post-uri (html/select body [:div.title :> :a])]
-                                            (let [html (last (clojure.string/split (get-in post-uri [:attrs :href]) #"/" ))]
-                                              (subs html 0 (- (count html) 5))))]
-                                   posts
-                                   )))
-                posts (<? (get-posts-in-page page-no))
-                pool (chan pool-size)
-                chs (loop [[cur & rests] posts chs []]
-                      (if cur
-                        (recur rests (conj chs (run-async-with-buffer #(process-post cur) pool)))
-                        chs
-                        )
-                      )]
-               (filter identity (<? (take-all! chs)))
-
-            )))
 
 (defn str->time [str]
   (try (let [time (.parseDateTime ^DateTimeFormatter (.withZone (f/formatter "E MMM dd HH:mm:ss yyyy") (DateTimeZone/forID "Asia/Taipei"))
@@ -234,38 +262,59 @@
          (if (t/before? time (t/date-time 2000)) nil time))
        (catch Exception e nil)) )
 
-(defn process-posts-in-page [page board]
-  (loop [page page board board]
-    (let
-      [posts (p :process-page (<!! (binding [board board]
-                                     (process-page page))))]
 
-      (if (instance? Exception posts)
-        (do (warn posts "Error Retry")
-            (Thread/sleep 1000)
-            (recur page board))
-        (let [posts (map #(assoc % :time (str->time (:time %))) posts)
-              posts (filter :time posts)]
-          (reverse (sort-by :time posts))
-          )
-        )
-      )
-    ))
-(defn post-seq
+(defn post-id-sequence
   ([board]
-   (let [raw-body (<!! (async-get-and-retry (format "http://www.ptt.rocks/bbs/%s/" board) options))
+   (let [{:keys [status body] :as ret} (ptt-endpoint (format "/bbs/%s/index.html" board))
+         raw-body body
          body (html/html-snippet raw-body)
          ; get number of pages
-         pages  (inc (read-string (second (re-find #"index(\d+)" (get-in (second (html/select body [:a.btn.wide])) [:attrs :href])))))
+         pages  (try
+                  (-> (html/select body [:a.btn.wide])
+                      (second)
+                      (get-in  [:attrs :href])
+                      (->> (re-find #"index(\d+)"))
+                      (second)
+                      (read-string)
+                      (inc)
+                      )
+                  (catch Exception e (error e "Can't parse number of pages" board ret))
+                  )
          ]
-     (post-seq board pages)
+     (post-id-sequence board pages)
      ))
   ([board page-no]
    (if (> page-no 0)
-     (concat (p :process-one-page (process-posts-in-page page-no board))
-             (lazy-seq (post-seq board (dec page-no))))
-     [])
-   )
+     (let [{:keys [status body]} (ptt-endpoint (format "/bbs/%s/index%d.html" board page-no))
+           raw-body body
+           body (html/html-snippet raw-body)
+
+           posts (for [post-uri (->> (html/select body [:div.bbs-screen :> :div])
+                                     ; take until we hit the ret-sep
+                                     (take-while #(= (get-in % [:attrs :class]) "r-ent") )
+                                     (map #(first (html/select % [:div.title :> :a] )) )
+                                     (filter identity)
+                                     )]
+
+                   (let [html (last (clojure.string/split (get-in post-uri [:attrs :href]) #"/" ))]
+                     (subs html 0 (- (count html) 5))))
+           posts (reverse posts)
+           ]
+       (concat posts (lazy-seq (post-id-sequence board (dec page-no))))
+       )
+     )
+    )
+  )
+
+(defn post-seq [board]
+  (->> (post-id-sequence board)
+       (map (fn [p] (future (process-post board p))))
+       (partition 20)
+       (apply concat)
+       (map #(identity @%))
+       (filter identity)
+       (map #(assoc % :time (str->time (:time %))))
+       (filter :time))
   )
 
 (defn upload-to-solr [posts]
@@ -301,25 +350,20 @@
                           :last_modified (c/to-string time)}
                          (catch Exception e (warn e p)
                                             (throw e))))
-                     ) posts)
-        ch (chan 1)
-        callback #(if (or (:error %) (not= (:status %) 200))
-                   (put! ch (do (error %)
-                                (Exception. (str "Query " "Error:" %))))
-                   (put! ch (:body %)))]
-    (http/post "http://localhost:8983/solr/collection1/update?wt=json&commitWithin=60000"
-               {:headers {"Content-Type" "application/json"} :body (json/generate-string posts)} callback)
-    (let [ret (<!! ch)]
-      (if (error? ret)
-        (throw ret)
-        ret))
-    )
+                     ) posts)]
 
+    (let [{:keys [body status]} @(http/post "http://localhost:8983/solr/collection1/update?wt=json&commitWithin=60000"
+                                           {:headers {"Content-Type" "application/json"}
+                                            :body (json/generate-string posts)})]
+      (if-not (= 200 status)
+        (throw (Exception. (str status body)))
+        body))
+    )
   )
 (defn update? [key bytes]
   (try
     (not= (alength bytes) (:instance-length
-                            (s3/get-object-metadata cred
+                            (s3/get-object-metadata (get-cred)
                                                     :bucket-name "ptt.rocks"
                                                     :key key)))
        (catch AmazonS3Exception e
@@ -337,7 +381,7 @@
     (if (update? key bytes)
       (do
 
-        (let [ret (s3/put-object cred
+        (let [ret (s3/put-object (get-cred)
                                  :bucket-name "ptt.rocks"
                                  :key key
                                  :input-stream input
@@ -350,55 +394,58 @@
       (do (trace "Key:" key "did not change.")
           0)
       )
-
-
     )
   )
 
-(defn upload [p]
-  (let [
-        s3  (upload-to-s3 p)
-        solr (upload-to-solr [p])]
-    {:s3  s3
-     :solr solr})
+
+
+(defn fetch-posts [board ago]
+  (let [min-time  (t/minus (t/now) ago)
+        posts (take-while #(t/after?  (:time %) min-time) (post-seq board))]
+    (loop [[p & ps :as posts] posts count 0 update 0]
+
+      (if p
+        (let [ret (try
+                    (upload-to-solr [p])
+                    (upload-to-s3 p)
+                    (catch Exception e e))]
+          (if (error? ret)
+            (do
+              (error ret p "Upload to solr or s3 failed...")
+              (Thread/sleep 10000)
+              (recur posts count update))
+            (recur ps (inc count) (+ update ret))
+            )
+
+          )
+        (info (format "[%s] %s Done %s Posts %s Updated, Last Post %s" ago board count update (:time p)))
+        )
+      )
+    )
   )
+
 
 (defn get-boards []
-  (let [hot-boards (map html/text (html/select (html/html-snippet (<!! (async-get-and-retry "https://www.ptt.cc/hotboard.html" options))) [:tr (html/nth-child 2) :a]))]
-    (into #{} (concat default-boards hot-boards))
-    )
-  )
-(defn fetch-posts [ago]
-  (try
-    (profile :info (keyword (str "fetch-post-time" ago))
-             (doseq [board-name (get-boards) ]               ;
-               (let [min-time  (t/minus (t/now) ago)]
-                 (binding [board board-name]
-                   (try
-                     (loop [[p & posts] (post-seq board) count 0 update 0]
-                       (let [{:keys [s3 solr] :as update-ret} (try (upload p) (catch Exception e e))]
-                         (cond
-                           (error? update-ret)
-                             (do (error update-ret p "Upload to solr or s3 failed...")
-                                 (Thread/sleep 10000)
-                                 (recur (concat [p] posts) count update))
-                           (and  (or (t/after?  (:time p) min-time) (< count 20))
-                                 (seq posts))
-                            (recur posts (inc count) (+ update s3))
-                           :else
-                            (info (format "[%s] %s Done %s Posts %s Updated, Last Post %s" ago board count update (:time p)))
-                           )
-                         )
+  (let [{:keys [body status] } (ptt-endpoint "/hotboard.html")
+        hot-boards (-> body
+                       (html/html-snippet)
+                       (html/select  [:tr (html/nth-child 2) :a])
+                       (->> (map html/text ))
                        )
-                     (catch Exception e (error e))))
-                 )))
-    (catch Exception e (error e))
+        ]
+    (into #{} (concat default-boards hot-boards))
     )
   )
 
 (defn periodic-fetch-posts [ago delay]
   (loop []
-    (fetch-posts ago)
+    (try
+      (profile :info (keyword (str "fetch-post-time" ago))
+               (doseq [board (get-boards)]
+                 (fetch-posts board ago)
+                 ))
+      (catch Exception e (error e))
+      )
     (Thread/sleep delay)
     (recur)
     )
@@ -407,6 +454,7 @@
 (defn start []
   (thread (periodic-fetch-posts (t/days 30)  60000))
   (thread (periodic-fetch-posts (t/hours 24)  1000))
-  (thread (periodic-fetch-posts (t/hours 2)   1000)))
+  (thread (periodic-fetch-posts (t/hours 2)  1000))
+  )
 
 
