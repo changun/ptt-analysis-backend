@@ -44,38 +44,16 @@
 (def get-cred (memoize (fn [] (clojure.edn/read-string (slurp "aws.cred")))) )
 
 
-(defn lambda-invoke [payload]
-  (lambda/invoke (get-cred)
-                 :function-name "httpRequest"
-                 :payload payload
-  ))
+
 (defn ptt-endpoint-lambda
   "Make http request to ptt.cc via AWS Lambda"
   [path]
-  (let [payload (-> {:host "www.ptt.cc"
-                     :path path
-                     :headers {"cookie" "over18=1;"}}
-                    (json/generate-string)
 
-                    )
-        ; there is a bug in Lambda wrapper in determinig the payload type
-        ; here we walkaround the bug by try usign String first,
-        ; if it does not work, then use nio ByteBuffer
-        {:keys [status-code payload]} (try (lambda-invoke payload)
-                                           (catch Exception _
-                                             (lambda-invoke (-> payload
-                                                                (.getBytes)
-                                                                (ByteBuffer/wrap)))))]
-    (if (= status-code 200)
-      (-> payload
-          (ByteBufferBackedInputStream.)
-          (clojure.java.io/reader)
-          (json/parse-stream true)
-          )
-      (do (error status-code payload)
-          {:error (str status-code payload)})
-      )
-    )
+  @(http/get (str "http://localhost/lambda-proxy/proxy?url=https://www.ptt.cc" path)
+             {:headers {"cookie" "over18=1;"}
+              :timeout 10000             ; ms
+              :user-agent "I-am-an-ptt-crawler"
+              :insecure? true})
   )
 (defn ptt-endpoint-local
   "Make http request to ptt.cc via distributed proxies"
@@ -88,7 +66,7 @@
               :insecure? true})
   )
 (def ptt-endpoint
-  "The main endpoint to ptt. It optimize the performance by using mutiple way to access ptt pages,
+  "The main endpoint to ptt. It optimizes the performance by using mutiple way to access ptt pages,
   including AWS Lambda function and distributed proxy servers (see http://github.com/changun/proxy).
   It handlers auto-try with expotential backoff and periodically print performance metrics.
   "
@@ -101,7 +79,7 @@
         (loop [fail 0 force-local false]
           ; favor lamdba endpoint becuase it is cheaper?
           ; when force-local, always use local endpoint as some large page is only accessible via local endpoint
-          (let [{:keys [status body] :as ret} (try (if (and (> (rand) 0.1 ) (not force-local))
+          (let [{:keys [status body] :as ret} (try (if (and (> (rand) 0.5 ) (not force-local))
                                                 (ptt-endpoint-lambda path)
                                                 (ptt-endpoint-local path))
                                               (catch Exception e {:error e}))
