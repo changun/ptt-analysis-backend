@@ -37,7 +37,8 @@
                               "Kaohsiung" "Aviation" "MakeUp" "ONE_PIECE" "Wanted" "TaichungBun" "SuperJunior"
                               "creditcard" "Japandrama" "HelpBuy" "gay" "GetMarry" "Examination" "PathofExile"
                               "japanavgirls" "BeautySalon" "Salary" "PC_Shopping" "Option" "SportLottery"
-                              "MenTalk" "feminine_sex" "lesbian" "CATCH" "graduate" "HardwareSale" "Hsinchu" "MayDay" "PublicIssue"]))
+                              "MenTalk" "feminine_sex" "lesbian" "CATCH" "graduate" "HardwareSale" "Hsinchu"
+                               "MayDay" "PublicIssue" "cat" "dog" ]))
 
 
 
@@ -413,8 +414,21 @@
                        (html/select  [:tr (html/nth-child 2) :a])
                        (->> (map html/text ))
                        )
+        ;http://www.ptt.rocks/solr/collection1/select?q=*%3A*&rows=0&wt=json&indent=true&facet=true&facet.field=board
+        existing-boards (try
+                          (-> @(http/get "http://localhost:8983/solr/collection1/select?q=*%3A*&rows=0&wt=json&indent=true&facet=true&facet.field=board")
+                              :body
+                              (json/parse-string true)
+                              (get-in [:facet_counts :facet_fields :board])
+                              (->> (partition 2)
+                                   (map (partial apply vector))
+                                   (into {})
+                                   )
+                              (keys)
+                              )
+                          (catch Exception _ nil))
         ]
-    (into #{} (concat default-boards hot-boards))
+    (into #{} (concat default-boards hot-boards existing-boards))
     )
   )
 
@@ -435,7 +449,7 @@
   )
 
 (defn start []
-  (thread (periodic-fetch-posts (t/days 30)  60000))
+  (thread (periodic-fetch-posts (t/days 30)  3600000))
   (thread (periodic-fetch-posts (t/hours 24)  1000))
   (thread (periodic-fetch-posts (t/hours 2)  1000))
   )
