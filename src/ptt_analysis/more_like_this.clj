@@ -33,7 +33,7 @@
                                        :body (ChineseUtils/toTraditional
                                                (apply str (:content news) (repeat 5 (:title news))))}))
                 body (json/parse-string body true)]
-            (info (:interestingTerms body))
+            (trace (:interestingTerms body))
             (map (fn [doc] (let [title (:title doc)]
                              (if (and title
                                       (not (string? title))
@@ -101,7 +101,16 @@
       ))
   )
 
+(defmacro timeit [body]
+  (let [s (gensym)
+        r (gensym)]
 
+    `(let [~s (System/nanoTime)
+           ~r (do ~@body)]
+
+       [(double (/ (- (System/nanoTime) ~s) 1000000)) ~r]
+       ))
+  )
 
 (defn search-handler [req]
   (with-channel req channel
@@ -109,7 +118,7 @@
                       {:keys [title content href] :as news} (try (cheshire.core/parse-string (slurp (:body req)) true) (catch Exception _ nil))]
                   (if (and title content)
                     (go (try
-                          (let [matches (filter #(> (:score %) 0.15) (<? (get-more-like-this news 1)))
+                          (let [[solr-time matches] (timeit (filter #(> (:score %) 0.15) (<? (get-more-like-this news 1))))
                                 ; make sure there is no nil
                                 matches (map (fn [{:keys [push dislike arrow popularity length fb-share-count fb-comment-count fb-like-count] :as m}]
                                                (assoc m :push (or push 0)
@@ -175,7 +184,9 @@
                                 ]
                             (send! channel (merge default-response
                                                   {:body (cheshire.core/generate-string response)}))
-                            (info "Served request:" req "in" (/ (- (System/nanoTime) start-time) 1e6))
+                            (info "Served more-like-this. time:"   (double (/ (- (System/nanoTime) start-time) 1e6))
+                                  " solr-time:" solr-time
+                                  )
                             )
                           (catch Exception e (do (error e "search error!" req)
                                                  (send! channel {:status 400

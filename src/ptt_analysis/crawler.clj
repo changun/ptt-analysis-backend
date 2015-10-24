@@ -4,9 +4,9 @@
            (com.amazonaws.services.s3.model AmazonS3Exception)
            (com.luhuiguo.chinese ChineseUtils)
            (org.joda.time.format DateTimeFormatter)
-           (com.fasterxml.jackson.databind.util ByteBufferBackedInputStream)
 
-           (java.nio ByteBuffer))
+
+           (java.util Arrays))
   (:require [org.httpkit.client :as http]
             [clojure.core.async :refer [chan <! go put! <!! >! thread]]
             [net.cgrand.enlive-html :as html]
@@ -19,7 +19,7 @@
             [taoensso.timbre.profiling :refer (pspy pspy* profile defnp p p*)]
             [clj-time.coerce :as c]
             [amazonica.aws.s3 :as s3]
-            [amazonica.aws.lambda :as lambda]
+            [ptt-analysis.solr :as solr]
             [clojure.edn]
             )
   (:use ptt-analysis.async))
@@ -48,19 +48,25 @@
 
 (defn ptt-endpoint-lambda
   "Make http request to ptt.cc via AWS Lambda"
-  [path]
+  [path & [string-hash]]
 
   @(http/get (str "http://localhost/lambda-proxy/proxy?url=https://www.ptt.cc" path)
-             {:headers {"cookie" "over18=1;"}
+             {:headers    (cond-> {"cookie" "over18=1;"}
+                                  string-hash
+                                  (assoc "string-hash" (str string-hash)))
+
               :timeout 10000             ; ms
               :user-agent "I-am-an-ptt-crawler"
               :insecure? true})
   )
 (defn ptt-endpoint-local
   "Make http request to ptt.cc via distributed proxies"
-  [path]
+  [path & [string-hash]]
   @(http/get (str "http://localhost/proxies/proxy?url=https://www.ptt.cc" path)
-             {:headers {"cookie" "over18=1;"}
+             {:headers (cond-> {"Accept-Encoding" "gzip, deflate"
+                                "cookie" "over18=1;"}
+                               string-hash
+                               (assoc "string-hash" (str string-hash)))
               :basic-auth ["pttrocks" "Cens0123!"]
               :timeout 10000             ; ms
               :user-agent "I-am-an-ptt-crawler"
@@ -75,14 +81,14 @@
   (let [speed-meter (atom 0)
         total-count (atom 0)
         error-count (atom 0)]
-    (fn [path]
+    (fn [path & [string-hash]]
       (let [start (t/now)]
         (loop [fail 0 force-local false]
           ; favor lamdba endpoint becuase it is cheaper?
           ; when force-local, always use local endpoint as some large page is only accessible via local endpoint
-          (let [{:keys [status body] :as ret} (try (if (and (> (rand) 0.5 ) (not force-local))
-                                                (ptt-endpoint-lambda path)
-                                                (ptt-endpoint-local path))
+          (let [{:keys [status body] :as ret} (try (if (and (> (rand) 0.9 ) (not force-local))
+                                                (ptt-endpoint-lambda path string-hash)
+                                                (ptt-endpoint-local path string-hash))
                                               (catch Exception e {:error e}))
                 ; slurp the body if needed
                 ret (cond-> ret
@@ -202,8 +208,10 @@
   )
 
 (defn process-post [board post]
-  (let [{:keys [status body]} (ptt-endpoint (format "/bbs/%s/%s.html" board post))]
-    (if (= 200 status)
+  (let [string-hash (:string-hash (solr/get-post board post))
+        {:keys [status body]} (ptt-endpoint (format "/bbs/%s/%s.html" board post) string-hash)]
+    (cond
+      (= 200 status)
       (let [raw-body body
             body (html/html-snippet body)
             {:keys [author title time ip content]} (parse-author-title-time body)]
@@ -227,11 +235,16 @@
              :fb-like-count like_count
              :fb-comment-count comment_count
              :fb-click-count click_count
-             :raw-body raw-body}
+             :raw-body raw-body
+             }
             )
           (trace "Skip" board post title " which has no auhtor")
           )
-        ))
+        )
+      (= 201 status)
+      (trace "Skip" board post "due to the same string-hash")
+
+      )
     )
   )
 
@@ -302,42 +315,42 @@
 
 (defn upload-to-solr [posts]
   (let [posts (map (fn [{:keys [_id title content author time board pushed length content-links push-links
-                                fb-like-count fb-comment-count fb-click-count fb-share-count] :as p}]
+                                fb-like-count fb-comment-count fb-click-count fb-share-count raw-body] :as p}]
 
                      (let [freqs (frequencies (map :op pushed))
                            pushes (or (get freqs "推") 0)
                            dislike (or (get freqs "噓") 0)
                            arrow (or (get freqs "→") 0)]
                        (try
-                         {:id (str board ":" (:_id p))
-                          :title title
-                          :content (concat [(ChineseUtils/toTraditional
-                                              content)]
-                                           (map (comp #(ChineseUtils/toTraditional %) :content) pushed)
-                                           )
-                          :author author
-                          :category board
-                          :popularity (count pushed)
-                          :push pushes
-                          :dislike dislike
-                          :arrow arrow
-                          :fb-like-count fb-like-count
+                         {:id               (str board ":" (:_id p))
+                          :title            title
+                          :content          (concat [(ChineseUtils/toTraditional
+                                                       content)]
+                                                    (map (comp #(ChineseUtils/toTraditional %) :content) pushed)
+                                                    )
+                          :author           author
+                          :category         board
+                          :popularity       (count pushed)
+                          :push             pushes
+                          :dislike          dislike
+                          :arrow            arrow
+                          :fb-like-count    fb-like-count
                           :fb-comment-count fb-comment-count
-                          :fb-click-count fb-click-count
-                          :fb-share-count fb-share-count
-                          :length length
-                          :board board
-                          :content-links content-links
-                          :push-links   push-links
-                          :isReply (not (nil? (re-matches #"^Re.*" (or title ""))))
-                          :last_modified (c/to-string time)}
+                          :fb-click-count   fb-click-count
+                          :fb-share-count   fb-share-count
+                          :length           length
+                          :board            board
+                          :content-links    content-links
+                          :push-links       push-links
+                          :isReply          (not (nil? (re-matches #"^Re.*" (or title ""))))
+                          :last_modified    (c/to-string time)
+                          :string-hash      (Arrays/hashCode (.getBytes raw-body "UTF-8"))
+                          }
                          (catch Exception e (warn e p)
                                             (throw e))))
                      ) posts)]
 
-    (let [{:keys [body status]} @(http/post "http://localhost:8983/solr/collection1/update?wt=json&commitWithin=60000"
-                                           {:headers {"Content-Type" "application/json"}
-                                            :body (json/generate-string posts)})]
+    (let [{:keys [body status]} (solr/add-posts posts)]
       (if-not (= 200 status)
         (throw (Exception. (str status body)))
         body))
@@ -398,9 +411,8 @@
             )
 
           )
-        (info (format "[%s] %s Done %s Posts %s Updated, Last Post %s" ago board count update (:time (last all-posts))))
+        (info (format "[%s] %s Done %s Posts %s Updated" ago board count update))
         )
-
       )
 
     )
@@ -416,16 +428,7 @@
                        )
         ;http://www.ptt.rocks/solr/collection1/select?q=*%3A*&rows=0&wt=json&indent=true&facet=true&facet.field=board
         existing-boards (try
-                          (-> @(http/get "http://localhost:8983/solr/collection1/select?q=*%3A*&rows=0&wt=json&indent=true&facet=true&facet.field=board")
-                              :body
-                              (json/parse-string true)
-                              (get-in [:facet_counts :facet_fields :board])
-                              (->> (partition 2)
-                                   (map (partial apply vector))
-                                   (into {})
-                                   )
-                              (keys)
-                              )
+                          (solr/get-all-boards)
                           (catch Exception _ nil))
         ]
     (into #{} (concat default-boards hot-boards existing-boards))
@@ -446,12 +449,12 @@
     (Thread/sleep delay)
     (recur)
     )
+  (solr/optimize)
   )
 
 (defn start []
-  (thread (periodic-fetch-posts (t/days 30)  3600000))
+  (thread (periodic-fetch-posts (t/days 7)  3600000))
   (thread (periodic-fetch-posts (t/hours 24)  1000))
-  (thread (periodic-fetch-posts (t/hours 2)  1000))
   )
 
 
