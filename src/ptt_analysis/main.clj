@@ -2,7 +2,7 @@
   (:gen-class)
   (:require [ptt-analysis.server :as server]
             [ptt-analysis.crawler :as crawler]
-            [ptt-analysis.proxy :as proxy])
+            )
   (:use [clojure.tools.nrepl.server :only (start-server stop-server)])
   )
 
