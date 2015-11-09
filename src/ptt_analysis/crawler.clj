@@ -1,6 +1,6 @@
 (ns ptt-analysis.crawler
   (:import (org.joda.time DateTimeZone)
-           (java.io ByteArrayInputStream InputStream)
+           (java.io ByteArrayInputStream)
            (com.amazonaws.services.s3.model AmazonS3Exception)
            (com.luhuiguo.chinese ChineseUtils)
            (org.joda.time.format DateTimeFormatter)
@@ -20,9 +20,11 @@
             [clj-time.coerce :as c]
             [amazonica.aws.s3 :as s3]
             [ptt-analysis.solr :as solr]
+            [ptt-analysis.post :as post]
             [clojure.edn]
             )
-  (:use ptt-analysis.async))
+  (:use [ptt-analysis.async]
+        [ptt-analysis.endpoint]))
 
 
 
@@ -46,156 +48,6 @@
 
 
 
-(defn ptt-endpoint-lambda
-  "Make http request to ptt.cc via AWS Lambda"
-  [path & [string-hash]]
-
-  @(http/get (str "http://localhost/lambda-proxy/proxy?url=https://www.ptt.cc" path)
-             {:headers    (cond-> {"cookie" "over18=1;"}
-                                  string-hash
-                                  (assoc "string-hash" (str string-hash)))
-
-              :timeout 10000             ; ms
-              :user-agent "I-am-an-ptt-crawler"
-              :insecure? true})
-  )
-(defn ptt-endpoint-local
-  "Make http request to ptt.cc via distributed proxies"
-  [path & [string-hash]]
-  @(http/get (str "http://localhost/proxies/proxy?url=https://www.ptt.cc" path)
-             {:headers (cond-> {"Accept-Encoding" "gzip, deflate"
-                                "cookie" "over18=1;"}
-                               string-hash
-                               (assoc "string-hash" (str string-hash)))
-              :basic-auth ["pttrocks" "Cens0123!"]
-              :timeout 10000             ; ms
-              :user-agent "I-am-an-ptt-crawler"
-              :insecure? true})
-  )
-(def ptt-endpoint
-  "The main endpoint to ptt. It optimizes the performance by using mutiple way to access ptt pages,
-  including AWS Lambda function and distributed proxy servers (see http://github.com/changun/proxy).
-  It handlers auto-try with expotential backoff and periodically print performance metrics.
-  "
-  ; performance metrics
-  (let [speed-meter (atom 0)
-        total-count (atom 0)
-        error-count (atom 0)]
-    (fn [path & [string-hash]]
-      (let [start (t/now)]
-        (loop [fail 0 force-local false]
-          ; favor lamdba endpoint becuase it is cheaper?
-          ; when force-local, always use local endpoint as some large page is only accessible via local endpoint
-          (let [{:keys [status body] :as ret} (try (if (and (> (rand) 0.9 ) (not force-local))
-                                                (ptt-endpoint-lambda path string-hash)
-                                                (ptt-endpoint-local path string-hash))
-                                              (catch Exception e {:error e}))
-                ; slurp the body if needed
-                ret (cond-> ret
-                        (and body (isa? (class body) InputStream))
-                        (assoc :body (slurp body)))
-                ]
-            (cond
-              ; Lambda return "Connection reset by peer", which occur when the page is too large for lambda to fecth.
-              ; Try again with local endpoint
-              (= (:error ret) "read ECONNRESET")
-                (recur (inc fail) true)
-              ; for server error or any other kind of exception (not including 404)
-              ; retry with expotential backoff
-              (or (#{503 500 502} status) (:error ret) (not status))
-                (let [wait (min (* 1000 60 20) (* (Math/pow 1.5 fail) 500))]
-                  (if-not (= status 503)
-                    (do (comment (error (:error ret) ret path "Retry in " wait "ms")))
-                    )
-                  (swap! error-count inc)
-                  (Thread/sleep wait)
-                  (recur (inc fail) force-local))
-              ; success! update performance metrics and return the response
-              :default
-              (do
-                (swap! speed-meter + (t/in-millis (t/interval start (t/now))))
-                (swap! total-count inc)
-                ; print metric every 1000 requests
-                (when (= 0 (mod @total-count 1000))
-                  (info (format "Average response time %s Average error rate %s"
-                                (float (/ @speed-meter 1000))
-                                (float (/ @error-count 1000))))
-                  (reset! speed-meter 0)
-                  (reset! error-count 0)
-                  )
-                ret
-                )
-              )
-            )
-
-          )
-
-        )))
-  )
-
-(defn parse-content [body]
-  (let [content-div (:content (into {} (html/select body [:#main-content])))
-        article-content (filter (fn [%]
-                                  (or (string? %)
-                                       (and (= :span (:tag %))
-                                            (not= "f2" (get-in % [:attrs :class])))))
-                                content-div)
-        article-content (map #(if (map? %)
-                               (or (clojure.string/join " " (:content %)) "")
-                               %
-                               ) article-content)
-        ]
-    (clojure.string/join " " article-content)
-    )
-  )
-
-(defn parse-real-content-length [body]
-  (->> (html/select  body  [:#main-content])
-       (first)
-       (:content)
-       (filter string?)
-       (clojure.string/join)
-       (#(clojure.string/replace % #"\P{L}" ""))
-       (count)
-       )
-  )
-(defn parse-author-title-time [body]
-  (if-let [headers (seq (html/select body [:.article-meta-value]))]
-    (let [[author _ title time] (map html/text headers)
-          author  (re-find #"^[^( ]+" author)
-          f2s (map html/text (html/select body [:.f2]))
-          ips (map #(re-find #"\d+\.\d+\.\d+\.\d+" %) f2s )
-          ips (filter seq ips)
-          ip (last ips)
-          content  (parse-content body)]
-      {:author author :title title :time time :ip ip :content content})
-    )
-
-  )
-
-(defn parse-pushes [body]
-  (let [pushes (html/select body [:.push])
-        pushes (map (fn [push]
-                      (let [op (html/text (first (html/select push [:.push-tag])))
-                            user-id (html/text (first (html/select push [:.push-userid])))
-                            ip-date (html/text (first (html/select push [:.push-ipdatetime])))
-                            content  (html/text (first (html/select push [:.push-content])))
-                            ]
-                        (if (and (seq op) (seq user-id) )
-                          {:op (clojure.string/trim op)
-                           :user (clojure.string/trim user-id)
-                           :ip-date (clojure.string/trim ip-date)
-                           :content (apply str (drop-while #(or (= \space % ) (= \: %)) (or content "")))})
-                        )
-
-                      ) pushes)]
-    (filter identity pushes)
-
-
-    )
-
-  )
-
 (defn get-fb-stats [board id]
   (let [{:keys [body status]} @(http/get (format "http://api.facebook.com/restserver.php?method=links.getStats&urls=https://www.ptt.cc/bbs/%s/%s.html&format=json" board id)) ]
     (if (= 200 status)
@@ -207,42 +59,28 @@
     )
   )
 
-(defn process-post [board post]
-  (let [string-hash (:string-hash (solr/get-post board post))
-        {:keys [status body]} (ptt-endpoint (format "/bbs/%s/%s.html" board post) string-hash)]
+(defn process-post [board post-id]
+  (let [string-hash (:string-hash (solr/get-post board post-id))
+        {:keys [status body]} (ptt-endpoint (format "/bbs/%s/%s.html" board post-id) string-hash)]
     (cond
       (= 200 status)
-      (let [raw-body body
-            body (html/html-snippet body)
-            {:keys [author title time ip content]} (parse-author-title-time body)]
-        (if (and author title)
-          (let [{:keys [share_count like_count comment_count click_count] :as fb}
-                (get-fb-stats board post)
-                pushes (parse-pushes body)
-                length (parse-real-content-length body)]
-            {:_id post
-             :author author
-             :title title
-             :time time
-             :pushed pushes
-             :board board
-             :ip ip
-             :content content
-             :length length
-             :content-links (map html/text (html/select body [:#main-content :> :a]))
-             :push-links  (map html/text (html/select body [:#main-content :.push :a]))
-             :fb-share-count share_count
-             :fb-like-count like_count
-             :fb-comment-count comment_count
-             :fb-click-count click_count
-             :raw-body raw-body
-             }
-            )
-          (trace "Skip" board post title " which has no auhtor")
+      (if-let [post (post/html->post body)]
+        (let [{:keys [share_count like_count comment_count click_count] :as fb}
+              (get-fb-stats board post-id)]
+          (merge post
+                 {:_id post-id
+                  :fb-share-count share_count
+                  :fb-like-count like_count
+                  :fb-comment-count comment_count
+                  :fb-click-count click_count
+                  :raw-body body
+                  }
+                 )
           )
+        (trace "Skip" board post-id " which has no auhtor")
         )
       (= 201 status)
-      (trace "Skip" board post "due to the same string-hash")
+      (trace "Skip" board post-id "due to the same string-hash")
 
       )
     )

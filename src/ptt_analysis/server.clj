@@ -3,19 +3,30 @@
   (:require [clojure.core.async :refer [chan <! go put! <!! >!]]
             [ring.middleware.cors :refer [wrap-cors]]
             [ptt-analysis.more-like-this :as more-like-this]
-            [ptt-analysis.latest-popular :as latest-popular])
+            [ptt-analysis.latest-popular :as latest-popular]
+            [ptt-analysis.share :as share]
+            [taoensso.timbre :as timbre
+             :refer (log info warn error trace)]
+            )
   (:use org.httpkit.server)
   (:use [ring.middleware.params         :only [wrap-params]]
         [ring.middleware.json :only [wrap-json-response]]
+        [ring.middleware.file :only [file-request]]
+        [ring.middleware.head :only [wrap-head]]
+
         [ptt-analysis.async]
         )
   )
 (defonce server (atom nil))
 
-
-
 (defn handler [{:keys [uri] :as req}]
+  (info uri)
   (cond
+    (re-matches #"/share/([^/]+)/([^/]+)"  uri)
+      (let [[_ board post-id] (re-matches #"/share/([^/]+)/([^/]+)"  uri)]
+        (share/share-page board post-id req)
+        )
+
     (= uri "/search")
       (more-like-this/search-handler req)
     (= uri "/latest")
