@@ -7,26 +7,33 @@
             [ptt-analysis.share :as share]
             [taoensso.timbre :as timbre
              :refer (log info warn error trace)]
-            )
+            [net.cgrand.enlive-html :as html])
   (:use org.httpkit.server)
-  (:use [ring.middleware.params         :only [wrap-params]]
+  (:use [ring.middleware.params :only [wrap-params]]
         [ring.middleware.json :only [wrap-json-response]]
         [ring.middleware.file :only [file-request]]
         [ring.middleware.head :only [wrap-head]]
 
         [ptt-analysis.async]
         )
-  )
+  (:import (java.io File)))
 (defonce server (atom nil))
 
+
+
+(html/deftemplate install-page-template (File. "/home/azureuser/share/install.html")
+                  [ctxt]
+                  )
+
 (defn handler [{:keys [uri] :as req}]
-  (info uri)
+
   (cond
     (re-matches #"/share/([^/]+)/([^/]+)"  uri)
       (let [[_ board post-id] (re-matches #"/share/([^/]+)/([^/]+)"  uri)]
         (share/share-page board post-id req)
         )
-
+    (.startsWith uri "/install")
+      {:body (apply str (install-page-template {}))}
     (= uri "/search")
       (more-like-this/search-handler req)
     (= uri "/latest")
