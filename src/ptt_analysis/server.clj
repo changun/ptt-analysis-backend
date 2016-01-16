@@ -3,7 +3,7 @@
   (:require [clojure.core.async :refer [chan <! go put! <!! >!]]
             [ring.middleware.cors :refer [wrap-cors]]
             [ptt-analysis.more-like-this :as more-like-this]
-            [ptt-analysis.latest-popular :as latest-popular]
+
             [ptt-analysis.share :as share]
             [taoensso.timbre :as timbre
              :refer (log info warn error trace)]
@@ -16,12 +16,12 @@
 
         [ptt-analysis.async]
         )
-  (:import (java.io File)))
+  )
 (defonce server (atom nil))
 
 
 
-(html/deftemplate install-page-template (File. "/home/azureuser/share/install.html")
+(html/deftemplate install-page-template (clojure.java.io/resource "install.html")
                   [ctxt]
                   )
 
@@ -36,8 +36,7 @@
       {:body (apply str (install-page-template {}))}
     (= uri "/search")
       (more-like-this/search-handler req)
-    (= uri "/latest")
-      (latest-popular/latest-popular-handler req)
+
     (= uri "/health")
       (with-channel req channel
         (async-get "http://localhost:8983/solr/collection1/admin/ping?wt=json" {}

@@ -27,8 +27,8 @@
                  [com.taoensso/carmine "2.4.0"]
                  [log4j/log4j "1.2.17"]
                  [com.squareup.okhttp/okhttp "2.3.0"]
-                 [edu.stanford.nlp/stanford-corenlp "3.5.2"]
-                 [local/stanford-segmenter "3.5.2"]
+                 ;  [edu.stanford.nlp/stanford-corenlp "3.5.2"]
+                 ;[local/stanford-segmenter "3.5.2"]
 
 
 

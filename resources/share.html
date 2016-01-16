@@ -1,10 +1,56 @@
-<!DOCTYPE html>
-<html>
-<head lang="en">
-    <meta charset="UTF-8">
-    <title></title>
-</head>
-<body>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+    <meta charset="utf-8" />
+    <link rel="chrome-webstore-item" href="https://chrome.google.com/webstore/detail/gdkkokghilkdmknohbaoimdnpladihfd">
 
+    <meta name="viewport" content="width=device-width">
+
+    <title></title>
+    <meta name="robots" content="all" />
+    <link rel="stylesheet" type="text/css" href="https://cdnjs.cloudflare.com/ajax/libs/semantic-ui/2.1.6/semantic.css"/>
+    <link rel="stylesheet" type="text/css" href="//images.ptt.cc/v2.13/bbs-common.css" />
+    <link rel="stylesheet" type="text/css" href="//images.ptt.cc/v2.13/bbs.css" media="screen" />
+    <link rel="stylesheet" type="text/css" href="//images.ptt.cc/v2.13/pushstream.css" media="screen" />
+    <link rel="stylesheet" type="text/css" href="//images.ptt.cc/v2.13/bbs-print.css" media="print" />
+
+
+</head>
+<script>
+    (function(i,s,o,g,r,a,m){i['GoogleAnalyticsObject']=r;i[r]=i[r]||function(){
+                (i[r].q=i[r].q||[]).push(arguments)},i[r].l=1*new Date();a=s.createElement(o),
+            m=s.getElementsByTagName(o)[0];a.async=1;a.src=g;m.parentNode.insertBefore(a,m)
+    })(window,document,'script','//www.google-analytics.com/analytics.js','ga');
+
+    ga('create', 'UA-58095038-1', 'auto');
+    ga('send', 'pageview');
+
+</script>
+
+<body style="padding-top: 0px;">
+<div id="install-banner" class="ui inverted segment" style="margin-top: 0px;">
+    閱讀新聞同步獲取 Ptt 鄉民觀點，立即安裝 <button style="margin-left: 5px;" class="ui inverted button" >看看鄉民怎麼說</button>
+</div>
+<div></div>
+<div id="main-content"></div>
+<div id="install-banner" class="ui inverted segment" style="margin-bottom: 0px;">
+    閱讀新聞同步獲取 Ptt 鄉民觀點，立即安裝 <button style="margin-left: 5px;" class="ui inverted button" >看看鄉民怎麼說</button>
+</div>
 </body>
-</html>
+<script src="//code.jquery.com/jquery-2.1.4.min.js"></script>
+<script src="//cdnjs.cloudflare.com/ajax/libs/semantic-ui/2.1.6/semantic.min.js"></script>
+<script src="//cdnjs.cloudflare.com/ajax/libs/jquery-browser/0.0.8/jquery.browser.min.js"></script>
+<script>
+
+    //if (chrome.app.isInstalled) {
+    //  document.getElementById('install-banner').style.display = 'none';
+    //}
+    $("button").click(function(){
+        if($.browser.mozilla){
+            window.location.href="https://bit.ly/ptt-ff";
+        }else{
+            window.location.href="https://bit.ly/ptt-chrome";
+        }
+
+    })
+
+    </script>

@@ -1,9 +1,9 @@
-
-
 (ns ptt-analysis.share
   (:require [amazonica.aws.s3 :as s3]
-            [net.cgrand.enlive-html :as html]))
-(def cred (delay (clojure.edn/read-string (slurp "aws.cred"))))
+            [net.cgrand.enlive-html :as html]
+            [clojure.edn :as edn]))
+
+(def cred (delay (edn/read-string (slurp "aws.cred"))))
 
 
 (defn get-page-froms3 [board post-id]
@@ -18,7 +18,7 @@
 
       ))
 
-(html/deftemplate share-page-template (File. "/home/azureuser/share/index.html")
+(html/deftemplate share-page-template (clojure.java.io/resource "share.html")
                   [ctxt]
                   [:#main-content] (html/content (:main ctxt))
                   [:head :title] (html/content (:title ctxt))
