@@ -3,47 +3,19 @@
            (com.luhuiguo.chinese ChineseUtils))
   (:require
     [clj-time.core :as t]
-    [taoensso.timbre :as timbre
+    [taoensso.timbre :as
      :refer (log info warn error trace)]
     [cheshire.core :as json]
-    [taoensso.timbre.profiling :as profiling
+    [taoensso.timbre.profiling
      :refer (pspy pspy* profile defnp p p*)]
     [clj-time.coerce :as c]
-    [clojure.core.async :refer [chan <! go put! <!! >!]])
+    [clojure.core.async :refer [chan <! go put! <!! >!]]
+    [ptt-analysis.solr :as solr])
   (:use org.httpkit.server
         ptt-analysis.async)
   )
 
-(defn get-more-like-this [news popularity]
-  (go-try (let [body (<? (async-post  "http://localhost:8983/solr/mlt"
-                                      {:query-params
-                                                {"mlt.fl" "text,title"
-                                                 "mlt.boost" "true"
-                                                 "mlt.interestingTerms" "details"
-                                                 "fl" "id,title,score,popularity,last_modified,author,push,dislike,arrow,subject,length,fb-share-count,fb-like-count,fb-comment-count,content-links"
-                                                 "fq" ["last_modified:[NOW/DAY-60DAYS TO NOW/DAY+1DAY]"
-                                                       (format "popularity:[%s TO *]" popularity)]
 
-                                                 "rows" "300"
-                                                 "mlt.qf" "text^2"
-                                                 "wt"  "json"
-                                                 }
-                                       :headers {"Content-Type" "application/json"}
-
-                                       :body (ChineseUtils/toTraditional
-                                               (apply str (:content news) (repeat 5 (:title news))))}))
-                body (json/parse-string body true)]
-            (trace (:interestingTerms body))
-            (map (fn [doc] (let [title (:title doc)]
-                             (if (and title
-                                      (not (string? title))
-                                      (seq title))
-                               (assoc doc :title (first title))
-                               doc
-                               )
-                             )) (:docs (:response body)))))
-
-  )
 
 (defn normalize [coll]
   (if (seq coll)
@@ -81,9 +53,7 @@
   (/ (or push 0) (t/in-minutes (t/interval (c/from-string last_modified) (t/now))))
   )
 
-(defn image-urls [urls]
 
-  )
 
 (defn excellent-article? [{:keys [push dislike length title push-rate fb-total content-links]}]
   (and
@@ -114,11 +84,17 @@
 
 (defn search-handler [req]
   (with-channel req channel
-                (let [start-time (System/nanoTime)
-                      {:keys [title content href] :as news} (try (cheshire.core/parse-string (slurp (:body req)) true) (catch Exception _ nil))]
-                  (if (and title content)
-                    (go (try
-                          (let [[solr-time matches] (timeit (filter #(> (:score %) 0.15) (<? (get-more-like-this news 1))))
+                (try
+                  (let [start-time (System/nanoTime)
+                        {:keys [title content href] :as news}
+                        (cheshire.core/parse-string (slurp (:body req)) true)]
+                    (if (not (and title content))
+                      (throw (RuntimeException. "Wrong parameters")))
+                    (solr/more-like-this
+                      news 1
+                      (fn [docs]
+                        (try
+                          (let [[solr-time matches] (timeit (filter #(> (:score %) 0.15) docs))
                                 ; make sure there is no nil
                                 matches (map (fn [{:keys [push dislike arrow popularity length fb-share-count fb-comment-count fb-like-count] :as m}]
                                                (assoc m :push (or push 0)
@@ -131,20 +107,20 @@
                                 ; set a cap on popularity
                                 matches (map (fn [{:keys [push dislike arrow popularity] :as m}]
                                                (assoc m
-                                                      :push (if (> push 150) 150 push)
-                                                      :dislike (if (> dislike 150) 150 dislike)
-                                                      :arrow (if (> arrow 150) 150 arrow)
-                                                      :popularity (if (> popularity 200) 200 popularity))
+                                                 :push (if (> push 150) 150 push)
+                                                 :dislike (if (> dislike 150) 150 dislike)
+                                                 :arrow (if (> arrow 150) 150 arrow)
+                                                 :popularity (if (> popularity 200) 200 popularity))
                                                ) matches)
                                 matches (map (fn [m] (assoc m :push-rate (push-rate m)) ) matches)
                                 matches (map (fn [pop push score fb-total recent match]
                                                (assoc match
-                                                      :n-pop pop
-                                                      :n-push push
-                                                      :n-score score
-                                                      :n-fb-total fb-total
-                                                      :n-recent recent
-                                                      )
+                                                 :n-pop pop
+                                                 :n-push push
+                                                 :n-score score
+                                                 :n-fb-total fb-total
+                                                 :n-recent recent
+                                                 )
                                                )
                                              (normalize (map :popularity matches))
                                              (normalize (map :push matches))
@@ -194,14 +170,17 @@
                                                                          {:reason "Something went wrong..."}) })
 
                                                  ))
-                          )
-                        )
+                          ))
+                      )
+
+                    )
+                  (catch Exception e
                     (send! channel (merge default-response
                                           {:status 400
                                            :body (cheshire.core/generate-string
                                                    {:reason "The request must contains a valid json in the body with title and content fields"}) }))
-                    )
-                  )
+                    (warn e)))
+
 
                 )
   )
