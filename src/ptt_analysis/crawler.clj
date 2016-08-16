@@ -27,8 +27,15 @@
 
 (DateTimeZone/setDefault (DateTimeZone/forID "Asia/Taipei"))
 
-; task queue
+; statistics
 
+(def finished (atom 0))
+(def unchanged (atom 0))
+(def route-usage (atom {}))
+(def errors (atom #{}))
+
+
+; task queue
 (def task-queue (LinkedBlockingQueue. 200000))
 (defn get-task! [] (.take task-queue))
 (defn add-task! [task] (.add task-queue task))
@@ -51,15 +58,29 @@
   (into #{} (concat ptt/default-boards (ptt/hot-boards) (solr/boards)))
   )
 
+(defn generator []
+  (loop []
+    (try
+      (doseq [board (shuffle (get-boards))]
+        (try
+          (doseq [post (scan-posts board)]
+            (try
+              (add-task! (schema.core/validate Task post))
+              (catch Throwable e (swap! errors conj (assoc post :error e)))
+              ))
+          (catch Throwable e (swap! errors conj {:error e :board board})))
+        )
+      (catch Throwable e (swap! errors conj {:error e}))
+      )
+    (if (not (Thread/interrupted))
+      (recur))
+    )
+  )
+
 
 
 ; task worker
 
-
-(def finished (atom 0))
-(def unchanged (atom 0))
-(def route-usage (atom {}))
-(def errors (atom #{}))
 
 (def routes
   [""
@@ -76,21 +97,24 @@
    "https://proxy-430.appspot.com/proxy?url="])
 
 (defn exist? [task body status]
-  (or
-    (= 304 status)
-    (let [{:keys [string-hash title author]} (solr/get-post task)]
-      (and
-        title author (= (post/post-hash body) string-hash)))
+  (let [{:keys [string-hash title author]} (solr/get-post task)]
+    (and title author
+         (or
+           (= 304 status)
+           (= (post/post-hash body) string-hash)
 
+           ))
     )
+
   )
 
 (defn pipeline [route]
   (binding [base-path route]
     (let [task (get-task!)]
       (try
+
         (let [{:keys [body status]}
-              (ptt/get-raw-post task)
+              (ptt/get-raw-post (assoc task :string-hash (solr/get-post task))  )
               ]
           (cond
             (= status 404)
@@ -117,23 +141,7 @@
     (recur route))
 )
 
-(defn generator []
-  (loop []
-    (try
-      (doseq [board (shuffle (get-boards))]
-        (try
-          (doseq [post (scan-posts board)]
-            (add-task! post))
-          (catch Throwable _))
-        )
-      (catch Throwable e (clojure.stacktrace/print-cause-trace e))
-      )
-    (if (not (Thread/interrupted))
-      (recur))
-    )
-  )
-
-
+; reporter
 
 (defn reporter []
   (loop []

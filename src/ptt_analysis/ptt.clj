@@ -30,7 +30,12 @@
     (:body)
       (html/html-snippet)
       (html/select  [:tr (html/nth-child 2) :a])
-      (->> (map html/text ))
+      (->> (map html/text )
+           (map #(first (clojure.string/split % #"\|")))
+           )
+
+
+
       )
   )
 
@@ -87,7 +92,7 @@
                              title
                              (-> (html/select post-entry [:div.title :> :a])
                                  (first)
-                                 (html/text  )
+                                 (html/text)
                                  )
                              author
                              (-> (html/select post-entry [:div.meta :> :div.author])
@@ -96,7 +101,8 @@
                                  )
                              ]
                          {:id (subs url 0 (- (count url) 5))
-                          :title title
+                          :title (if (< (count title) 50)
+                                   title)
                           :author author
                           :board board})
 

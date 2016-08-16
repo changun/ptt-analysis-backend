@@ -98,11 +98,20 @@
       (.withZone  (DateTimeZone/forID "Asia/Taipei"))
       )
   )
-
-(s/defn html->post :- Post [{:keys [id raw-body] :as ret}]
+(defn extract-title [body]
+  (->
+      body
+      (html/select  [(html/attr= :property "og:title") ])
+      (first)
+      (get-in [:attrs :content])
+      )
+  )
+(s/defn html->post :- Post [{:keys [id raw-body title] :as ret}]
   (let [body (html/html-snippet raw-body)
         {:keys [ip content]}
         (content-and-ip body)
+        title
+        (or title (extract-title body))
         time (id->time id)
         ]
     (let [pushes (parse-pushes body time)
@@ -113,6 +122,7 @@
          :pushed pushes
          :content content
          :ip ip
+         :title title
          :length length
          :content-links (map html/text (html/select body [:#main-content :> :a]))
          :push-links  (map html/text (html/select body [:#main-content :.push :a]))
