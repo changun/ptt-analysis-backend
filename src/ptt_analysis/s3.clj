@@ -9,6 +9,7 @@
 
 
 (defn add-post [{:keys [id board raw-body]}]
+  {:pre  [(seq board) (seq id) (seq raw-body)]}
   (let [bytes (.getBytes raw-body "UTF-8")
         input (ByteArrayInputStream. bytes)
         key (str "posts/" board "/" id ".html")

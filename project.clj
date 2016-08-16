@@ -3,7 +3,7 @@
   :url "http://example.com/FIXME"
   :license {:name "Eclipse Public License"
             :url "http://www.eclipse.org/legal/epl-v10.html"}
-  :jvm-opts ["-Xmx1g" "-server" "-XX:-OmitStackTraceInFastThrow" ]
+  :jvm-opts ["-Xmx1g" "-server" "-XX:-OmitStackTraceInFastThrow"]
   :profiles {:dev {:resource-paths ["resources"]}}
   ;:aot [ptt-analysis.main]
   ; :main ptt-analysis.main
@@ -20,10 +20,11 @@
                  [com.luhuiguo/chinese-utils "1.0"]
                  [amazonica "0.3.22"]
                  [log4j/log4j "1.2.17"]
+                 [swiss-arrows "1.0.0"]
                  [prismatic/schema "1.0.4"]
                  [org.clojure/core.async "0.1.346.0-17112a-alpha"]
-
-
+                 [clj-http "2.2.0"]
+                  [org.littleshoot/littleproxy "1.1.0"]
 
                  ])
 

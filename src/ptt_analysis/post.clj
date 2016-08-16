@@ -8,8 +8,8 @@
   (:use [ptt-analysis.schema])
   (:import
     (org.joda.time DateTimeZone DateTime)
-    (org.joda.time.format DateTimeFormatter)
-    ))
+
+    (java.util Arrays)))
 
 
 (defn parse-content [body]
@@ -25,33 +25,20 @@
     )
   )
 
-(def time-formatter (.withZone (f/formatter "E MMM dd HH:mm:ss yyyy") (DateTimeZone/forID "Asia/Taipei")))
 
-(defn str->time [str]
-  (let [time (->> (clojure.string/replace str #"\s+" " ")
-                  (.parseDateTime ^DateTimeFormatter time-formatter))]
-    (if (< (t/year time) 1990)
-      (throw (RuntimeException. (str "Time string error" str)))
-      time
-      )
-    )
-  )
 
-(defn parse-author-title-time [body]
-  (if-let [headers (seq (html/select body [:.article-meta-value]))]
-    (let [[author _ title time] (map html/text headers)
-          author  (re-find #"^[^( ]+" author)
-          f2s (map html/text (html/select body [:.f2]))
-          ips (map #(re-find #"\d+\.\d+\.\d+\.\d+" %) f2s )
-          ips (filter seq ips)
-          ip (last ips)
-          content  (parse-content body)]
-      {:author author :title title :time (str->time time) :ip ip :content content})
-    )
+
+(defn content-and-ip [body]
+  (let [f2s (map html/text (html/select body [:.f2]))
+        ips (map #(re-find #"\d+\.\d+\.\d+\.\d+" %) f2s )
+        ips (filter seq ips)
+        ip (last ips)
+        content  (parse-content body)]
+    {:ip ip :content content})
 
   )
 (defn post-hash [post]
-  (java.util.Arrays/hashCode (.getBytes post "UTF-8")))
+  (Arrays/hashCode (.getBytes post "UTF-8")))
 
 (def date-time-format (.withZone (f/formatter "M/dd HH:mm") (DateTimeZone/forID "Asia/Taipei")))
 
@@ -112,37 +99,25 @@
       )
   )
 
-(s/defn html->post :- Post [board id raw-html]
-  (let [body (html/html-snippet raw-html)
-        {:keys [author title ip content time]}
-        (parse-author-title-time body)
-        time (or time
-                 (-> (re-matches #"M.(\d+)\.\w\.[\d\w]+" id)
-                     (second )
-                     (Long/valueOf )
-                     (* 1000 )
-                     (c/from-long)
-                     (.withZone  (DateTimeZone/forID "Asia/Taipei"))
-                     ))
+(s/defn html->post :- Post [{:keys [id raw-body] :as ret}]
+  (let [body (html/html-snippet raw-body)
+        {:keys [ip content]}
+        (content-and-ip body)
+        time (id->time id)
         ]
-    (if (and author title)
-      (let [pushes (parse-pushes body time)
-            length (parse-real-content-length body)]
-        {:id id
-         :board board
-         :raw-body raw-html
-         :author author
-         :title title
-         :time time
+    (let [pushes (parse-pushes body time)
+          length (parse-real-content-length body)]
+      (merge
+        ret
+        {:time time
          :pushed pushes
-         :ip ip
          :content content
+         :ip ip
          :length length
          :content-links (map html/text (html/select body [:#main-content :> :a]))
          :push-links  (map html/text (html/select body [:#main-content :.push :a]))
          }
         )
-      (throw (RuntimeException. (str board ":" id " author or title is missing:" author title) ))
       )
     )
   )

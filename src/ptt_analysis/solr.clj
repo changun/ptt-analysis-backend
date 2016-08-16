@@ -19,7 +19,10 @@
   )
 
 (s/defn ^:always-validate solr-post :- SolrPost
-  [{:keys [id title content time board pushed] :as post} fb-stats]
+  [{:keys [id title content time board pushed length
+           content-links push-links string-hash
+           author
+           ]} fb-stats]
   (let [freqs (frequencies (map :op pushed))
         pushes (or (get freqs "推") 0)
         dislike (or (get freqs "噓") 0)
@@ -27,20 +30,26 @@
         ]
     (merge
       fb-stats
-      post
       {:id            (str board ":" id)
        :content       (->> (cons content (map :content pushed))
                            (map #(ChineseUtils/toTraditional %)))
+       :title title
+       :author author
+
+
        :category      board
 
        :popularity    (+ pushes dislike arrow)
        :push          pushes
        :dislike       dislike
        :arrow         arrow
+       :length length
+       :content-links content-links
+       :push-links push-links
 
        :isReply       (not (nil? (re-matches #"^Re.*" (or title ""))))
        :last_modified (c/to-string time)
-       :string-hash   (post/post-hash (:raw-post post))
+       :string-hash   string-hash
        })
     )
   )
@@ -57,7 +66,7 @@
 
   )
 
-(defn get-post [board id]
+(defn get-post [{:keys [board id]}]
   (-> (solr-endpoint :get (format "/select?q=id:%%22%s:%s%%22&wt=json" board id)
                      )
       :body

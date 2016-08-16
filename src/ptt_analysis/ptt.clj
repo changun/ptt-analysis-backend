@@ -26,7 +26,7 @@
 
 (defn hot-boards []
   (->
-    @(ptt-endpoint "/hotboard.html")
+    (ptt-endpoint "/hotboard.html")
     (:body)
       (html/html-snippet)
       (html/select  [:tr (html/nth-child 2) :a])
@@ -36,10 +36,10 @@
 
 
 
-(defn post-raw [board post-id string-hash & [callback]]
-  (ptt-endpoint (format "/bbs/%s/%s.html" board post-id)
+(defn get-raw-post [{:keys [board id string-hash]} ]
+  (ptt-endpoint (format "/bbs/%s/%s.html" board id)
                 {:headers {"string-hash" (str string-hash)}}
-                callback)
+                )
   )
 
 
@@ -47,7 +47,7 @@
 
 (defn post-ids
   ([board]
-   (let [{:keys [status body] :as ret} @(ptt-endpoint (format "/bbs/%s/index.html" board))
+   (let [{:keys [status body] :as ret} (ptt-endpoint (format "/bbs/%s/index.html" board))
          raw-body body
          body (html/html-snippet raw-body)
          ; get number of pages
@@ -67,20 +67,47 @@
      ))
   ([board page-no]
    (if (> page-no 0)
-     (let [{:keys [status body]} @(ptt-endpoint (format "/bbs/%s/index%d.html" board page-no))
+     (let [{:keys [status body]} (ptt-endpoint (format "/bbs/%s/index%d.html" board page-no))
            raw-body body
            body (html/html-snippet raw-body)
-
-           posts (for [post-uri (->> (html/select body [:div.bbs-screen :> :div])
+           posts (for [post-entry (->> (html/select body [:div.bbs-screen :> :div])
                                      ; take until we hit the ret-sep
                                      (take-while #(= (get-in % [:attrs :class]) "r-ent") )
-                                     (map #(first (html/select % [:div.title :> :a])))
-                                     (filter identity)
-                                     )]
 
-                   (let [html (last (clojure.string/split (get-in post-uri [:attrs :href]) #"/" ))]
-                     (subs html 0 (- (count html) 5))))
-           posts (reverse posts)
+                                     )]
+                   (do
+                     (if-let  [url-entry (first (html/select post-entry [:div.title :> :a]))]
+                       (let [url
+                             (->
+                               url-entry
+                               (get-in  [:attrs :href])
+                               (clojure.string/split  #"/" )
+                               (last)
+                               )
+                             title
+                             (-> (html/select post-entry [:div.title :> :a])
+                                 (first)
+                                 (html/text  )
+                                 )
+                             author
+                             (-> (html/select post-entry [:div.meta :> :div.author])
+                                 (first)
+                                 (html/text  )
+                                 )
+                             ]
+                         {:id (subs url 0 (- (count url) 5))
+                          :title title
+                          :author author
+                          :board board})
+
+                       )
+                     )
+
+
+                   )
+           posts (->> (reverse posts)
+                      (filter identity)
+                      )
            ]
        (concat posts (lazy-seq (post-ids board (dec page-no))))
        )

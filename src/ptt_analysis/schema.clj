@@ -35,9 +35,10 @@
 (def SolrPost
   (merge
     FaceStats
-    Post
+
     {:id               (s/pred #(re-matches #".+:M\.\d+\.[\w]\.[\d\w]+" %))
      :content [s/Str]
+     :length s/Int
      :popularity       s/Int
      :push             s/Int
      :dislike          s/Int
@@ -46,5 +47,9 @@
      :last_modified    s/Str
      :string-hash      s/Int
      :category         s/Str
+     :content-links [s/Str]
+     :push-links  [s/Str]
+     :title s/Str
+     :author s/Str
      })
   )
