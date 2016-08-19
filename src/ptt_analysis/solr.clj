@@ -22,43 +22,42 @@
   [{:keys [id title content time board pushed length
            content-links push-links string-hash
            author
-           ]} fb-stats]
+           ]}]
   (let [freqs (frequencies (map :op pushed))
         pushes (or (get freqs "推") 0)
         dislike (or (get freqs "噓") 0)
         arrow (or (get freqs "→") 0)
         ]
-    (merge
-      fb-stats
-      {:id            (str board ":" id)
-       :content       (->> (cons content (map :content pushed))
-                           (map #(ChineseUtils/toTraditional %)))
-       :title title
-       :author author
+    {:id            (str board ":" id)
+     :content       (->> (cons content (map :content pushed))
+                         (map #(ChineseUtils/toTraditional %)))
+     :title title
+     :author author
 
 
-       :category      board
+     :category      board
 
-       :popularity    (+ pushes dislike arrow)
-       :push          pushes
-       :dislike       dislike
-       :arrow         arrow
-       :length length
-       :content-links content-links
-       :push-links push-links
+     :popularity    (+ pushes dislike arrow)
+     :push          pushes
+     :dislike       dislike
+     :arrow         arrow
+     :length length
+     :content-links content-links
+     :push-links push-links
 
-       :isReply       (not (nil? (re-matches #"^Re.*" (or title ""))))
-       :last_modified (c/to-string time)
-       :string-hash   string-hash
-       })
+     :isReply       (not (nil? (re-matches #"^Re.*" (or title ""))))
+     :last_modified (c/to-string time)
+     :string-hash   string-hash
+     }
     )
   )
 
 
-(defn add-post [{:keys [board id] :as post} ]
-  (let [post (solr-post post (fb/stats board id))
-        {:keys [status body]} (solr-endpoint :post "/update?wt=json&commitWithin=60000"
-                                             {:body    (json/generate-string [post])})]
+(defn add-post [post ]
+  (let [post (solr-post post)                              ;Give up getting fb information (fb/stats board id)
+        {:keys [status body]}
+        (solr-endpoint :post "/update?wt=json&commitWithin=60000"
+                       {:body    (json/generate-string [post])})]
     (if-not (= 200 status)
       (throw (RuntimeException. (str status body)))
       (json/parse-string body true))
@@ -74,6 +73,51 @@
       :response
       :docs
       first)
+  )
+(defn search [params & [start] ]
+  (let [start (or start 0)
+        options
+        {:timeout 1000000
+         :query-params
+         (assoc params :wt "json"
+                       :start start)}
+        {:keys [docs numFound start]}
+        (-> (solr-endpoint :get "/select" options)
+            :body
+            (json/parse-string true)
+            :response
+            )
+
+
+        ]
+    (if (< (+ start (count docs)) numFound)
+      (concat
+        docs
+        (lazy-seq (search params (+ start (count docs))))
+        )
+      docs
+      )
+
+
+
+    )
+  )
+
+(defn delete [id ]
+  (let [options
+        {:timeout 1000000
+         :query-params {:wt "json"}
+         :body (json/generate-string
+                 {:delete {:id id}}
+                 )}
+
+        ]
+    (-> (solr-endpoint :post "/update" options)
+        :body
+        (json/parse-string true)
+
+        )
+    )
   )
 
 

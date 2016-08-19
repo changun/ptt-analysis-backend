@@ -38,7 +38,7 @@
 ; task queue
 (def task-queue (LinkedBlockingQueue. 200000))
 (defn get-task! [] (.take task-queue))
-(defn add-task! [task] (.add task-queue task))
+(defn add-task! [task] (.put task-queue task))
 
 
 ; task generator
@@ -114,7 +114,7 @@
       (try
 
         (let [{:keys [body status]}
-              (ptt/get-raw-post (assoc task :string-hash (solr/get-post task))  )
+              (ptt/get-raw-post (assoc task :string-hash (:string-hash (solr/get-post task)))  )
               ]
           (cond
             (= status 404)
@@ -185,6 +185,21 @@
 (defn stop [{:keys [workers reporter generator]}]
   (doseq [w (conj workers reporter generator)]
     (future-cancel w)
+    )
+
+  )
+
+
+(doseq [{:keys [id author]} (solr/search {:q "id:/:.+/" :sort "last_modified desc"})]
+  (try
+    (when-let [new (first (solr/search {:q (str "id:/.+" id "/ AND author:" author)}))]
+      (solr/delete id)
+      (println id "->" (:id new))
+      )
+    (catch Exception e
+      (println "Error " id)
+      )
+
     )
 
   )

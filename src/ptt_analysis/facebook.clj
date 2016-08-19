@@ -5,8 +5,10 @@
   (:use [ptt-analysis.schema])
   )
 
-(def fb-stats-format "http://api.facebook.com/restserver.php?method=links.getStats&urls=https://www.ptt.cc/bbs/%s/%s.html&format=json")
+(def fb-stats-format "http://graph.facebook.com/?id=https://www.ptt.cc/bbs/%s/%s.html")
 
+
+; As of August 2016. We can only get comment count and share count
 (s/defn ^:always-validate stats :- FaceStats [board id]
   (let [{:keys [body status]}
         @(http/get
@@ -16,12 +18,12 @@
       (let [{:keys [share_count like_count comment_count click_count]}
             (-> body
                 (json/parse-string true)
-                (first)
+                (:share)
                 )]
         {:fb-share-count share_count
-         :fb-like-count like_count
+         :fb-like-count (or like_count 0)
          :fb-comment-count comment_count
-         :fb-click-count click_count}
+         :fb-click-count (or click_count 0)}
         )
       (recur board id))
     )

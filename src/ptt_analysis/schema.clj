@@ -33,31 +33,30 @@
    :raw-body      s/Str
    })
 
+
 (def FaceStats
   {:fb-share-count s/Int
-   :fb-like-count s/Int
+   :fb-like-count (s/maybe s/Int)
    :fb-comment-count s/Int
-   :fb-click-count s/Int
+   :fb-click-count (s/maybe s/Int)
    }
   )
-(def SolrPost
-  (merge
-    FaceStats
 
-    {:id            (s/pred #(re-matches #".+:M\.\d+\.[\w]\.[\d\w]+" %))
-     :content       [s/Str]
-     :length        s/Int
-     :popularity    s/Int
-     :push          s/Int
-     :dislike       s/Int
-     :arrow         s/Int
-     :isReply       s/Bool
-     :last_modified s/Str
-     :string-hash   s/Int
-     :category      Board
-     :content-links [s/Str]
-     :push-links    [s/Str]
-     :title         Title
-     :author        Author
-     })
+(def SolrPost
+  {:id            (s/pred #(re-matches #".+:M\.\d+\.[\w]\.[\d\w]+" %))
+   :content       [s/Str]
+   :length        s/Int
+   :popularity    s/Int
+   :push          s/Int
+   :dislike       s/Int
+   :arrow         s/Int
+   :isReply       s/Bool
+   :last_modified s/Str
+   :string-hash   s/Int
+   :category      Board
+   :content-links [s/Str]
+   :push-links    [s/Str]
+   :title         Title
+   :author        Author
+   }
   )
