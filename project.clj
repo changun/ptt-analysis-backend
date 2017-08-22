@@ -5,8 +5,8 @@
             :url "http://www.eclipse.org/legal/epl-v10.html"}
   :jvm-opts ["-Xmx1g" "-server" "-XX:-OmitStackTraceInFastThrow"]
   :profiles {:dev {:resource-paths ["resources"]}}
-  ;:aot [ptt-analysis.main]
-  ; :main ptt-analysis.main
+  :aot ptt-analysis.main
+  :main ptt-analysis.main
   :dependencies [[org.clojure/clojure "1.6.0"]
                  [http-kit "2.1.16"]
                  [enlive "1.1.5"]
@@ -24,7 +24,7 @@
                  [prismatic/schema "1.0.4"]
                  [org.clojure/core.async "0.1.346.0-17112a-alpha"]
                  [clj-http "2.2.0"]
-                  [org.littleshoot/littleproxy "1.1.0"]
-
+                 [org.littleshoot/littleproxy "1.1.0"]
+                 [org.clojure/tools.nrepl "0.2.12"]
                  ])
 

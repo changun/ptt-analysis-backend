@@ -8,7 +8,10 @@
 
 (def ^:dynamic base-path "")
 
-(def proxy-server (.start (DefaultHttpProxyServer/bootstrap)))
+(def proxy-server
+  (when-not *compile-files*
+    (.start (DefaultHttpProxyServer/bootstrap))
+    ))
 
 (defn ptt-endpoint
   ([path]

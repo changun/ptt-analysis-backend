@@ -1,10 +1,9 @@
 (ns ptt-analysis.more-like-this
-  (:import (org.joda.time DateTimeZone DateTime)
-           (com.luhuiguo.chinese ChineseUtils))
+  (:import (org.joda.time DateTimeZone DateTime))
   (:require
     [clj-time.core :as t]
-    [taoensso.timbre :as
-     :refer (log info warn error trace)]
+    [taoensso.timbre
+     :refer (warn error trace)]
     [cheshire.core :as json]
     [taoensso.timbre.profiling
      :refer (pspy pspy* profile defnp p p*)]
@@ -40,10 +39,10 @@
 
                        })
 (defn order-weight [{:keys [n-pop n-push n-score n-recent n-fb-total]}]
-  (+ (* n-push 5)(* n-pop 3) (* n-score 5) (* n-recent 10) (* n-fb-total 7))
+  (+ (* n-push 5)(* n-pop 3) (* n-score 5) (* n-recent 10))
   )
 (defn execellent-weight [{:keys [n-pop n-push n-score n-recent n-fb-total]}]
-  (+ (* n-push 10) (* n-score 5) (* n-recent 10) (* n-fb-total 7))
+  (+ (* n-push 10) (* n-score 5) (* n-recent 10))
   )
 (defn best-match-weight [{:keys [n-pop n-score n-recent]}]
   (+ (* n-pop 2) (* n-score 10) (* n-recent 8))
@@ -160,7 +159,7 @@
                                 ]
                             (send! channel (merge default-response
                                                   {:body (cheshire.core/generate-string response)}))
-                            (info "Served more-like-this. time:"   (double (/ (- (System/nanoTime) start-time) 1e6))
+                            (trace "Served more-like-this. time:"   (double (/ (- (System/nanoTime) start-time) 1e6))
                                   " solr-time:" solr-time
                                   )
                             )

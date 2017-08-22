@@ -5,7 +5,7 @@
             [ptt-analysis.more-like-this :as more-like-this]
 
             [ptt-analysis.share :as share]
-            [taoensso.timbre :as timbre
+            [taoensso.timbre
              :refer (log info warn error trace)]
             [net.cgrand.enlive-html :as html])
   (:use org.httpkit.server)
@@ -21,9 +21,10 @@
 
 
 
-(html/deftemplate install-page-template (clojure.java.io/resource "install.html")
-                  [ctxt]
-                  )
+(html/deftemplate
+  install-page-template (clojure.java.io/resource "install.html")
+  [ctxt]
+  )
 
 (defn handler [{:keys [uri] :as req}]
 

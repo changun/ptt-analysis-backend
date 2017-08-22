@@ -33,10 +33,7 @@
                          (map #(ChineseUtils/toTraditional %)))
      :title title
      :author author
-
-
      :category      board
-
      :popularity    (+ pushes dislike arrow)
      :push          pushes
      :dislike       dislike
@@ -138,18 +135,22 @@
 
 
 (defn more-like-this [news popularity callback]
-  (http/get  "http://localhost:8983/solr/mlt"
+  (http/post  "http://localhost:8983/solr/mlt"
              {:query-params
                        {"mlt.fl" "text,title"
                         "mlt.boost" "true"
                         "mlt.interestingTerms" "details"
                         "fl" "id,title,score,popularity,last_modified,author,push,dislike,arrow,subject,length,fb-share-count,fb-like-count,fb-comment-count,content-links"
                         "fq" ["last_modified:[NOW/DAY-60DAYS TO NOW/DAY+1DAY]"
-                              (format "popularity:[%s TO *]" popularity)]
+                              (format "popularity:[%s TO *]" popularity)
+                              ; skip documents that do not have category name
+                              "-id:/:.+/"
+                              ]
 
                         "rows" "300"
                         "mlt.qf" "text^2"
                         "wt"  "json"
+
                         }
               :headers {"Content-Type" "application/json"}
 

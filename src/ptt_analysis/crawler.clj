@@ -102,7 +102,6 @@
          (or
            (= 304 status)
            (= (post/post-hash body) string-hash)
-
            ))
     )
 
@@ -145,17 +144,18 @@
 
 (defn reporter []
   (loop []
-    (println "==================================================")
-    (println (format "Finished %d Unchanged %d Error %d"
+    (info "==================================================")
+    (info (format "Finished %d Unchanged %d Error %d"
                      @finished @unchanged (count @errors)))
-    (println "==================================================")
+    (info "==================================================")
     (doseq [e @errors]
-      (println "=================ERROR============================")
-      (println e)
+      (info "=================ERROR============================")
+      (info e)
+      (error (:error e))
       )
-    (println "==================================================")
+    (info "==================================================")
     (doseq [u @route-usage]
-      (println u)
+      (info u)
       )
     (reset! finished 0)
     (reset! unchanged 0)
@@ -189,15 +189,17 @@
 
   )
 
+(comment
+  (doseq [{:keys [id author]} (solr/search {:q "id:/:.+/" :sort "last_modified desc"})]
+    (try
+      (when-let [new (first (solr/search {:q (str "id:/.+" id "/ AND author:" author)}))]
+        (solr/delete id)
+        (println id "->" (:id new))
+        )
+      (catch Exception e
+        (println "Error " id)
+        )
 
-(doseq [{:keys [id author]} (solr/search {:q "id:/:.+/" :sort "last_modified desc"})]
-  (try
-    (when-let [new (first (solr/search {:q (str "id:/.+" id "/ AND author:" author)}))]
-      (solr/delete id)
-      (println id "->" (:id new))
-      )
-    (catch Exception e
-      (println "Error " id)
       )
 
     )
